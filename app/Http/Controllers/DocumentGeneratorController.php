@@ -12,6 +12,7 @@ use App\Services\DocumentBatchActivityLogger;
 use App\Services\ExcelExtractionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -107,6 +108,7 @@ class DocumentGeneratorController extends Controller
             'sort_by' => ['nullable', 'in:row_number,status,created_at,updated_at'],
             'sort_direction' => ['nullable', 'in:asc,desc'],
             'status' => ['nullable', 'in:queued,processing,docx_done,pdf_done,failed'],
+            'company_search' => ['nullable', 'string', 'max:255'],
         ]);
 
         $perPage = (int) ($validated['per_page'] ?? 10);
@@ -117,6 +119,9 @@ class DocumentGeneratorController extends Controller
         if (isset($validated['status'])) {
             $query->where('status', $validated['status']);
         }
+        if (isset($validated['company_search']) && trim($validated['company_search']) !== '') {
+            $this->applyCompanySearch($query, $validated['company_search']);
+        }
 
         $items = $query
             ->orderBy($sortBy, $sortDirection)
@@ -125,6 +130,7 @@ class DocumentGeneratorController extends Controller
                 return [
                     'id' => $item->id,
                     'row_number' => $item->row_number,
+                    'company' => self::extractCompanyFromRowData($item->row_data ?? []),
                     'status' => $item->status,
                     'row_data' => $item->row_data ?? [],
                     'docx_available' => ! empty($item->docx_path),
@@ -407,6 +413,7 @@ class DocumentGeneratorController extends Controller
         return [
             'id' => $item->id,
             'row_number' => $item->row_number,
+            'company' => self::extractCompanyFromRowData($item->row_data ?? []),
             'status' => $item->status,
             'row_data' => $item->row_data ?? [],
             'docx_available' => ! empty($item->docx_path),
@@ -415,5 +422,55 @@ class DocumentGeneratorController extends Controller
             'created_at' => $item->created_at?->toISOString(),
             'updated_at' => $item->updated_at?->toISOString(),
         ];
+    }
+
+    private function applyCompanySearch(Builder $query, string $companySearch): void
+    {
+        $search = '%'.mb_strtolower(trim($companySearch)).'%';
+        $driver = $query->getModel()->getConnection()->getDriverName();
+
+        if ($driver === 'pgsql') {
+            $query->whereRaw(
+                "exists (
+                    select 1
+                    from jsonb_each_text(row_data::jsonb) as company_entry(key, value)
+                    where lower(company_entry.key) like ?
+                    and lower(company_entry.value) like ?
+                )",
+                ['%company%', $search]
+            );
+
+            return;
+        }
+
+        $query->whereRaw('LOWER(CAST(row_data AS CHAR)) LIKE ?', [$search]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $rowData
+     */
+    private static function extractCompanyFromRowData(array $rowData): string
+    {
+        $fallback = '';
+
+        foreach ($rowData as $key => $value) {
+            $normalizedKey = self::normalizeCompanyKey((string) $key);
+            $stringValue = is_scalar($value) ? trim((string) $value) : '';
+
+            if ($normalizedKey === 'company') {
+                return $stringValue;
+            }
+
+            if ($fallback === '' && str_contains($normalizedKey, 'company')) {
+                $fallback = $stringValue;
+            }
+        }
+
+        return $fallback;
+    }
+
+    private static function normalizeCompanyKey(string $key): string
+    {
+        return preg_replace('/[^a-z0-9]+/', '', mb_strtolower($key)) ?? '';
     }
 }

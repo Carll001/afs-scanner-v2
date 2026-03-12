@@ -37,6 +37,7 @@ type BatchProgress = {
 type BatchItem = {
     id: number;
     row_number: number;
+    company: string;
     status: string;
     row_data: Record<string, string>;
     docx_available: boolean;
@@ -113,6 +114,7 @@ const itemsLoading = ref(false);
 const itemsSortBy = ref('row_number');
 const itemsSortDirection = ref<SortDirection>('asc');
 const itemStatusFilter = ref('all');
+const companySearch = ref('');
 
 const activityData = ref<PaginatedResponse<ActivityLog>>({
     current_page: 1,
@@ -136,6 +138,7 @@ const editingItem = ref<BatchItem | null>(null);
 const editForm = reactive<Record<string, string>>({});
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
+let companySearchDebounce: ReturnType<typeof setTimeout> | null = null;
 
 const csrfToken = () => {
     const xsrfCookie = document.cookie
@@ -281,6 +284,19 @@ const onItemStatusChange = async (value: string) => {
     await loadBatchItems(1);
 };
 
+const onCompanySearchInput = (event: Event) => {
+    const target = event.target as HTMLInputElement;
+    companySearch.value = target.value;
+
+    if (companySearchDebounce) {
+        clearTimeout(companySearchDebounce);
+    }
+
+    companySearchDebounce = setTimeout(() => {
+        void loadBatchItems(1);
+    }, 300);
+};
+
 const loadProgress = async () => {
     if (!activeBatchId.value) {
         return;
@@ -307,6 +323,9 @@ const loadBatchItems = async (page = itemsData.value.current_page) => {
 
         if (itemStatusFilter.value !== 'all') {
             query.status = itemStatusFilter.value;
+        }
+        if (companySearch.value.trim() !== '') {
+            query.company_search = companySearch.value.trim();
         }
 
         itemsData.value = await getApi<PaginatedResponse<BatchItem>>(
@@ -471,6 +490,13 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
         enableSorting: true,
     },
     {
+        id: 'company',
+        accessorKey: 'company',
+        header: 'Company',
+        enableSorting: false,
+        cell: ({ row }) => row.original.company || '-',
+    },
+    {
         id: 'status',
         accessorKey: 'status',
         header: 'Status',
@@ -597,17 +623,16 @@ const historyColumns = computed<ColumnDef<HistoryBatch>[]>(() => [
         enableSorting: false,
     },
     {
-        id: 'status',
-        accessorKey: 'status',
-        header: 'Status',
-        enableSorting: true,
+        id: 'generated',
+        header: 'Generated',
+        enableSorting: false,
         cell: ({ row }) =>
             h(
                 Badge,
                 {
-                    variant: statusBadgeVariant(row.original.status),
+                    variant: row.original.success_items > 0 ? 'default' : 'secondary',
                 },
-                () => row.original.status,
+                () => `${row.original.success_items}/${row.original.total_items}`,
             ),
     },
     {
@@ -643,6 +668,9 @@ const historyColumns = computed<ColumnDef<HistoryBatch>[]>(() => [
 
 onBeforeUnmount(() => {
     stopPolling();
+    if (companySearchDebounce) {
+        clearTimeout(companySearchDebounce);
+    }
 });
 </script>
 
@@ -723,22 +751,31 @@ onBeforeUnmount(() => {
                     <CardDescription>Per-row output status, editing, and downloads for the selected batch.</CardDescription>
                 </CardHeader>
                 <CardContent class="space-y-4">
-                    <div class="max-w-[220px]">
-                        <Label class="mb-2 block">Filter by status</Label>
-                        <Select :model-value="itemStatusFilter"
-                            @update:model-value="(value) => onItemStatusChange(String(value))">
-                            <SelectTrigger>
-                                <SelectValue placeholder="All statuses" />
-                            </SelectTrigger>
-                            <SelectContent>
-                                <SelectItem value="all">All</SelectItem>
-                                <SelectItem value="queued">Queued</SelectItem>
-                                <SelectItem value="processing">Processing</SelectItem>
-                                <SelectItem value="docx_done">Docx Done</SelectItem>
-                                <SelectItem value="pdf_done">Pdf Done</SelectItem>
-                                <SelectItem value="failed">Failed</SelectItem>
-                            </SelectContent>
-                        </Select>
+                    <div class="grid gap-4 md:grid-cols-[220px_minmax(0,320px)]">
+                        <div class="max-w-[220px]">
+                            <Label class="mb-2 block">Filter by status</Label>
+                            <Select :model-value="itemStatusFilter"
+                                @update:model-value="(value) => onItemStatusChange(String(value))">
+                                <SelectTrigger>
+                                    <SelectValue placeholder="All statuses" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="all">All</SelectItem>
+                                    <SelectItem value="queued">Queued</SelectItem>
+                                    <SelectItem value="processing">Processing</SelectItem>
+                                    <SelectItem value="docx_done">Docx Done</SelectItem>
+                                    <SelectItem value="pdf_done">Pdf Done</SelectItem>
+                                    <SelectItem value="failed">Failed</SelectItem>
+                                </SelectContent>
+                            </Select>
+                        </div>
+
+                        <div class="max-w-[320px]">
+                            <Label for="company-search" class="mb-2 block">Search company</Label>
+                            <Input id="company-search" :model-value="companySearch"
+                                placeholder="Type company name..."
+                                @input="onCompanySearchInput" />
+                        </div>
                     </div>
 
                     <DataTable :columns="itemColumns" :data="itemsData.data" :meta="itemsData" :loading="itemsLoading"
