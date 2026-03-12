@@ -7,17 +7,52 @@ use PhpOffice\PhpWord\TemplateProcessor;
 class DocxTemplateService
 {
     /**
+     * @return list<string>
+     */
+    public function placeholderKeys(string $templatePath): array
+    {
+        $processor = new TemplateProcessor($templatePath);
+        $this->configureMacroChars($processor);
+
+        return $this->extractPlaceholderKeys($processor);
+    }
+
+    /**
+     * @param array<string, string> $rowData
+     * @return array{missing_data: list<string>}
+     */
+    public function validateRowData(string $templatePath, array $rowData): array
+    {
+        $normalizedMap = [];
+        foreach ($rowData as $key => $value) {
+            $normalizedMap[$this->normalizeHeader($key)] = $value;
+        }
+
+        $missingData = [];
+
+        foreach ($this->placeholderKeys($templatePath) as $key) {
+            $normalizedKey = $this->normalizeHeader($key);
+            if (! array_key_exists($normalizedKey, $normalizedMap)) {
+                continue;
+            }
+
+            if (trim($normalizedMap[$normalizedKey]) === '') {
+                $missingData[] = $key;
+            }
+        }
+
+        return [
+            'missing_data' => array_values(array_unique($missingData)),
+        ];
+    }
+
+    /**
      * @param array<string, string> $rowData
      */
     public function render(string $templatePath, string $outputPath, array $rowData): void
     {
         $processor = new TemplateProcessor($templatePath);
-        if (method_exists($processor, 'setMacroChars')) {
-            $processor->setMacroChars('{', '}');
-        } else {
-            $processor->setMacroOpeningChars('{');
-            $processor->setMacroClosingChars('}');
-        }
+        $this->configureMacroChars($processor);
 
         $normalizedMap = [];
         foreach ($rowData as $key => $value) {
@@ -30,6 +65,16 @@ class DocxTemplateService
         }
 
         $processor->saveAs($outputPath);
+    }
+
+    private function configureMacroChars(TemplateProcessor $processor): void
+    {
+        if (method_exists($processor, 'setMacroChars')) {
+            $processor->setMacroChars('{', '}');
+        } else {
+            $processor->setMacroOpeningChars('{');
+            $processor->setMacroClosingChars('}');
+        }
     }
 
     /**

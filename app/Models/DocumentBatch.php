@@ -59,4 +59,12 @@ class DocumentBatch extends Model
     {
         return $this->hasMany(DocumentBatchItem::class);
     }
+
+    /**
+     * @return HasMany<DocumentBatchItemActivityLog, $this>
+     */
+    public function activityLogs(): HasMany
+    {
+        return $this->hasMany(DocumentBatchItemActivityLog::class);
+    }
 }

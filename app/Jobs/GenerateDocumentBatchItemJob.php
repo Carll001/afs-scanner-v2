@@ -4,6 +4,8 @@ namespace App\Jobs;
 
 use App\Models\DocumentBatch;
 use App\Models\DocumentBatchItem;
+use App\Models\User;
+use App\Services\DocumentBatchActivityLogger;
 use App\Services\DocxTemplateService;
 use App\Services\PdfConversionService;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -23,6 +25,7 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
     ) {}
 
     public function handle(
+        DocumentBatchActivityLogger $activityLogger,
         DocxTemplateService $docxTemplateService,
         PdfConversionService $pdfConversionService
     ): void {
@@ -54,6 +57,26 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
 
             /** @var array<string, string> $rowData */
             $rowData = $item->row_data ?? [];
+            $validation = $docxTemplateService->validateRowData($templatePath, $rowData);
+            if ($validation['missing_data'] !== []) {
+                $errorMessage = 'Missing data: '.implode(', ', $validation['missing_data']);
+                $this->markItemFinal($item->id, false, null, null, $errorMessage);
+                $failedItem = DocumentBatchItem::query()->find($item->id);
+
+                if ($failedItem instanceof DocumentBatchItem) {
+                    $activityLogger->log(
+                        $batch,
+                        $failedItem,
+                        null,
+                        'generation_failed_validation',
+                        "Row {$item->row_number} failed placeholder validation.",
+                        $validation
+                    );
+                }
+
+                return;
+            }
+
             $docxTemplateService->render($templatePath, $docxPath, $rowData);
 
             $this->markDocxDone($item->id, $docxRelativePath);
@@ -62,6 +85,20 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
             $storedPdfPath = $this->storePdfAsExpectedPath($pdfAbsolutePath, $pdfRelativePath);
 
             $this->markItemFinal($item->id, true, $docxRelativePath, $storedPdfPath);
+            $completedItem = DocumentBatchItem::query()->find($item->id);
+            if ($completedItem instanceof DocumentBatchItem) {
+                $activityLogger->log(
+                    $batch,
+                    $completedItem,
+                    null,
+                    'generation_completed',
+                    "Row {$item->row_number} generated successfully.",
+                    [
+                        'docx_path' => $docxRelativePath,
+                        'pdf_path' => $storedPdfPath,
+                    ]
+                );
+            }
         } catch (Throwable $exception) {
             $this->markItemFinal(
                 $item->id,
@@ -70,6 +107,23 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
                 null,
                 mb_substr($exception->getMessage(), 0, 2000)
             );
+
+            $batch = $item->batch;
+            if ($batch instanceof DocumentBatch) {
+                $failedItem = DocumentBatchItem::query()->find($item->id);
+                if ($failedItem instanceof DocumentBatchItem) {
+                    $activityLogger->log(
+                        $batch,
+                        $failedItem,
+                        null,
+                        'generation_failed',
+                        "Row {$item->row_number} generation failed.",
+                        [
+                            'error_message' => mb_substr($exception->getMessage(), 0, 2000),
+                        ]
+                    );
+                }
+            }
         }
     }
 

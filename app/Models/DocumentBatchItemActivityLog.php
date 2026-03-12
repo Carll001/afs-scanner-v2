@@ -5,11 +5,10 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 
-class DocumentBatchItem extends Model
+class DocumentBatchItemActivityLog extends Model
 {
-    /** @use HasFactory<\Database\Factories\DocumentBatchItemFactory> */
+    /** @use HasFactory<\Database\Factories\DocumentBatchItemActivityLogFactory> */
     use HasFactory;
 
     /**
@@ -17,14 +16,11 @@ class DocumentBatchItem extends Model
      */
     protected $fillable = [
         'document_batch_id',
-        'row_number',
-        'row_data',
-        'status',
-        'docx_path',
-        'pdf_path',
-        'error_message',
-        'started_at',
-        'completed_at',
+        'document_batch_item_id',
+        'user_id',
+        'action',
+        'summary',
+        'details',
     ];
 
     /**
@@ -33,9 +29,7 @@ class DocumentBatchItem extends Model
     protected function casts(): array
     {
         return [
-            'row_data' => 'array',
-            'started_at' => 'datetime',
-            'completed_at' => 'datetime',
+            'details' => 'array',
         ];
     }
 
@@ -48,10 +42,18 @@ class DocumentBatchItem extends Model
     }
 
     /**
-     * @return HasMany<DocumentBatchItemActivityLog, $this>
+     * @return BelongsTo<DocumentBatchItem, $this>
      */
-    public function activityLogs(): HasMany
+    public function item(): BelongsTo
     {
-        return $this->hasMany(DocumentBatchItemActivityLog::class, 'document_batch_item_id');
+        return $this->belongsTo(DocumentBatchItem::class, 'document_batch_item_id');
+    }
+
+    /**
+     * @return BelongsTo<User, $this>
+     */
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
     }
 }

@@ -6,10 +6,14 @@ use App\Http\Requests\DocumentBatchStoreRequest;
 use App\Jobs\GenerateDocumentBatchItemJob;
 use App\Models\DocumentBatch;
 use App\Models\DocumentBatchItem;
+use App\Models\DocumentBatchItemActivityLog;
+use App\Models\User;
+use App\Services\DocumentBatchActivityLogger;
 use App\Services\ExcelExtractionService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -93,15 +97,11 @@ class DocumentGeneratorController extends Controller
 
     public function progress(Request $request, DocumentBatch $batch): JsonResponse
     {
-        $this->assertBatchOwnership($request, $batch);
-
         return response()->json($this->batchProgressPayload($batch));
     }
 
     public function items(Request $request, DocumentBatch $batch): JsonResponse
     {
-        $this->assertBatchOwnership($request, $batch);
-
         $validated = $request->validate([
             'per_page' => ['nullable', 'integer', 'min:5', 'max:100'],
             'sort_by' => ['nullable', 'in:row_number,status,created_at,updated_at'],
@@ -126,6 +126,7 @@ class DocumentGeneratorController extends Controller
                     'id' => $item->id,
                     'row_number' => $item->row_number,
                     'status' => $item->status,
+                    'row_data' => $item->row_data ?? [],
                     'docx_available' => ! empty($item->docx_path),
                     'pdf_available' => ! empty($item->pdf_path),
                     'error_message' => $item->error_message,
@@ -154,10 +155,7 @@ class DocumentGeneratorController extends Controller
         DocumentBatchItem $item,
         string $type
     ): StreamedResponse|BinaryFileResponse {
-        $this->assertBatchOwnership($request, $batch);
-        if ($item->document_batch_id !== $batch->id) {
-            abort(404);
-        }
+        $this->assertItemBelongsToBatch($batch, $item);
 
         if (! in_array($type, ['docx', 'pdf'], true)) {
             abort(404);
@@ -178,9 +176,176 @@ class DocumentGeneratorController extends Controller
         return Storage::disk('local')->download($path, "batch-{$batch->id}-row-{$item->row_number}.docx");
     }
 
+    public function showItem(DocumentBatch $batch, DocumentBatchItem $item): JsonResponse
+    {
+        $this->assertItemBelongsToBatch($batch, $item);
+
+        return response()->json($this->batchItemPayload($item));
+    }
+
+    public function updateItem(
+        Request $request,
+        DocumentBatch $batch,
+        DocumentBatchItem $item,
+        DocumentBatchActivityLogger $activityLogger
+    ): JsonResponse {
+        $this->assertItemBelongsToBatch($batch, $item);
+
+        $validated = $request->validate([
+            'row_data' => ['required', 'array', 'min:1'],
+            'row_data.*' => ['nullable', 'string'],
+        ]);
+
+        /** @var array<string, string|null> $submittedRowData */
+        $submittedRowData = $validated['row_data'];
+        $existingRowData = $item->row_data ?? [];
+        $updatedRowData = [];
+
+        foreach ($existingRowData as $key => $value) {
+            $updatedRowData[$key] = (string) ($submittedRowData[$key] ?? '');
+        }
+
+        foreach ($submittedRowData as $key => $value) {
+            if (! array_key_exists($key, $updatedRowData)) {
+                $updatedRowData[$key] = (string) ($value ?? '');
+            }
+        }
+
+        DB::transaction(function () use ($request, $batch, $item, $updatedRowData, $existingRowData, $activityLogger): void {
+            $lockedItem = DocumentBatchItem::query()->lockForUpdate()->findOrFail($item->id);
+            $lockedBatch = DocumentBatch::query()->lockForUpdate()->findOrFail($batch->id);
+
+            $oldDocxPath = $lockedItem->docx_path;
+            $oldPdfPath = $lockedItem->pdf_path;
+            $previousStatus = $lockedItem->status;
+
+            if ($lockedItem->completed_at !== null) {
+                $lockedBatch->processed_items = max(0, $lockedBatch->processed_items - 1);
+            }
+            if ($previousStatus === 'pdf_done') {
+                $lockedBatch->success_items = max(0, $lockedBatch->success_items - 1);
+            }
+            if ($previousStatus === 'failed') {
+                $lockedBatch->failed_items = max(0, $lockedBatch->failed_items - 1);
+            }
+
+            $lockedItem->row_data = $updatedRowData;
+            $lockedItem->status = 'queued';
+            $lockedItem->docx_path = null;
+            $lockedItem->pdf_path = null;
+            $lockedItem->error_message = null;
+            $lockedItem->started_at = null;
+            $lockedItem->completed_at = null;
+            $lockedItem->save();
+
+            $lockedBatch->status = $lockedBatch->total_items > 0 ? 'queued' : 'completed';
+            $lockedBatch->started_at = null;
+            $lockedBatch->completed_at = null;
+            $lockedBatch->save();
+
+            foreach ([$oldDocxPath, $oldPdfPath] as $path) {
+                if (is_string($path) && $path !== '' && Storage::disk('local')->exists($path)) {
+                    Storage::disk('local')->delete($path);
+                }
+            }
+
+            /** @var User|null $actor */
+            $actor = $request->user();
+            $activityLogger->log(
+                $lockedBatch,
+                $lockedItem,
+                $actor,
+                'row_updated',
+                "Row {$lockedItem->row_number} was edited and queued for regeneration.",
+                [
+                    'before' => $existingRowData,
+                    'after' => $updatedRowData,
+                    'previous_status' => $previousStatus,
+                ]
+            );
+
+            if ($oldDocxPath || $oldPdfPath) {
+                $activityLogger->log(
+                    $lockedBatch,
+                    $lockedItem,
+                    $actor,
+                    'old_outputs_deleted',
+                    "Old generated files for row {$lockedItem->row_number} were deleted.",
+                    [
+                        'docx_path' => $oldDocxPath,
+                        'pdf_path' => $oldPdfPath,
+                    ]
+                );
+            }
+
+            $activityLogger->log(
+                $lockedBatch,
+                $lockedItem,
+                $actor,
+                'regeneration_requested',
+                "Regeneration requested for row {$lockedItem->row_number}.",
+                [
+                    'status' => 'queued',
+                ]
+            );
+        });
+
+        GenerateDocumentBatchItemJob::dispatch($item->id);
+
+        $refreshedItem = DocumentBatchItem::query()->findOrFail($item->id);
+
+        return response()->json($this->batchItemPayload($refreshedItem));
+    }
+
+    public function logs(Request $request, DocumentBatch $batch): JsonResponse
+    {
+        if (! Schema::hasTable('document_batch_item_activity_logs')) {
+            return response()->json([
+                'current_page' => 1,
+                'data' => [],
+                'last_page' => 1,
+                'per_page' => 10,
+                'total' => 0,
+            ]);
+        }
+
+        $validated = $request->validate([
+            'per_page' => ['nullable', 'integer', 'min:5', 'max:100'],
+        ]);
+
+        $perPage = (int) ($validated['per_page'] ?? 10);
+
+        $logs = DocumentBatchItemActivityLog::query()
+            ->with(['item:id,row_number', 'user:id,name'])
+            ->where('document_batch_id', $batch->id)
+            ->latest()
+            ->paginate($perPage)
+            ->through(static function (DocumentBatchItemActivityLog $log): array {
+                return [
+                    'id' => $log->id,
+                    'action' => $log->action,
+                    'summary' => $log->summary,
+                    'details' => $log->details ?? [],
+                    'created_at' => $log->created_at?->toISOString(),
+                    'row_number' => $log->item?->row_number,
+                    'user' => $log->user ? [
+                        'id' => $log->user->id,
+                        'name' => $log->user->name,
+                    ] : null,
+                ];
+            });
+
+        return response()->json($logs);
+    }
+
     private function assertBatchOwnership(Request $request, DocumentBatch $batch): void
     {
         abort_unless($batch->user_id === $request->user()->id, 404);
+    }
+
+    private function assertItemBelongsToBatch(DocumentBatch $batch, DocumentBatchItem $item): void
+    {
+        abort_unless($item->document_batch_id === $batch->id, 404);
     }
 
     /**
@@ -231,6 +396,24 @@ class DocumentGeneratorController extends Controller
             'success_items' => $batch->success_items,
             'failed_items' => $batch->failed_items,
             'progress_percent' => $batch->total_items === 0 ? 100 : min(100, $percent),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function batchItemPayload(DocumentBatchItem $item): array
+    {
+        return [
+            'id' => $item->id,
+            'row_number' => $item->row_number,
+            'status' => $item->status,
+            'row_data' => $item->row_data ?? [],
+            'docx_available' => ! empty($item->docx_path),
+            'pdf_available' => ! empty($item->pdf_path),
+            'error_message' => $item->error_message,
+            'created_at' => $item->created_at?->toISOString(),
+            'updated_at' => $item->updated_at?->toISOString(),
         ];
     }
 }

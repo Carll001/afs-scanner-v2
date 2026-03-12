@@ -1,11 +1,19 @@
 <script setup lang="ts">
 import type { ColumnDef } from '@tanstack/vue-table';
 import { Head } from '@inertiajs/vue3';
-import { computed, h, onBeforeUnmount, ref } from 'vue';
+import { computed, h, onBeforeUnmount, reactive, ref } from 'vue';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { DataTable } from '@/components/ui/data-table';
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -30,6 +38,7 @@ type BatchItem = {
     id: number;
     row_number: number;
     status: string;
+    row_data: Record<string, string>;
     docx_available: boolean;
     pdf_available: boolean;
     error_message: string | null;
@@ -48,6 +57,19 @@ type HistoryBatch = {
     failed_items: number;
     created_at: string | null;
     completed_at: string | null;
+};
+
+type ActivityLog = {
+    id: number;
+    action: string;
+    summary: string;
+    details: Record<string, unknown>;
+    created_at: string | null;
+    row_number: number | null;
+    user: {
+        id: number;
+        name: string;
+    } | null;
 };
 
 type PaginatedResponse<T> = {
@@ -92,10 +114,26 @@ const itemsSortBy = ref('row_number');
 const itemsSortDirection = ref<SortDirection>('asc');
 const itemStatusFilter = ref('all');
 
+const activityData = ref<PaginatedResponse<ActivityLog>>({
+    current_page: 1,
+    data: [],
+    last_page: 1,
+    per_page: 10,
+    total: 0,
+});
+const activityLoading = ref(false);
+
 const historyData = ref<PaginatedResponse<HistoryBatch>>(props.initialHistory);
 const historyLoading = ref(false);
 const historySortBy = ref('created_at');
 const historySortDirection = ref<SortDirection>('desc');
+
+const editDialogOpen = ref(false);
+const editSubmitting = ref(false);
+const editErrorMessage = ref<string | null>(null);
+const editErrors = ref<Record<string, string[]>>({});
+const editingItem = ref<BatchItem | null>(null);
+const editForm = reactive<Record<string, string>>({});
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -136,6 +174,36 @@ const getApi = async <T>(url: string): Promise<T> => {
             'X-Requested-With': 'XMLHttpRequest',
         },
     });
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+    }
+
+    return (await response.json()) as T;
+};
+
+const sendJson = async <T>(url: string, method: 'PUT', payload: unknown): Promise<T> => {
+    const response = await fetch(url, {
+        method,
+        credentials: 'same-origin',
+        headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-XSRF-TOKEN': csrfToken(),
+        },
+        body: JSON.stringify(payload),
+    });
+
+    if (response.status === 422) {
+        const errorPayload = (await response.json()) as {
+            errors?: Record<string, string[]>;
+            message?: string;
+        };
+        const validationError = new Error(errorPayload.message ?? 'Validation failed.');
+        Object.assign(validationError, { validationErrors: errorPayload.errors ?? {} });
+        throw validationError;
+    }
 
     if (!response.ok) {
         throw new Error(`Request failed with status ${response.status}`);
@@ -189,7 +257,7 @@ const postBatch = async () => {
         const payload = (await response.json()) as { batch_id: number };
         activeBatchId.value = payload.batch_id;
 
-        await Promise.all([loadProgress(), loadBatchItems(1), loadHistory(1)]);
+        await Promise.all([loadProgress(), loadBatchItems(1), loadActivityLogs(1), loadHistory(1)]);
         startPolling();
     } catch (error) {
         createErrorMessage.value = error instanceof Error ? error.message : 'Unable to create batch.';
@@ -272,6 +340,29 @@ const loadHistory = async (page = historyData.value.current_page) => {
     }
 };
 
+const loadActivityLogs = async (page = activityData.value.current_page) => {
+    if (!activeBatchId.value) {
+        return;
+    }
+
+    activityLoading.value = true;
+    try {
+        activityData.value = await getApi<PaginatedResponse<ActivityLog>>(
+            documentGeneratorRoutes.batches.logs.url(
+                { batch: activeBatchId.value },
+                {
+                    query: {
+                        page,
+                        per_page: activityData.value.per_page,
+                    },
+                },
+            ),
+        );
+    } finally {
+        activityLoading.value = false;
+    }
+};
+
 const stopPolling = () => {
     pollingActive.value = false;
     if (pollInterval) {
@@ -288,6 +379,7 @@ const startPolling = () => {
         try {
             await loadProgress();
             await loadBatchItems();
+            await loadActivityLogs();
 
             if (progress.value && ['completed', 'failed'].includes(progress.value.status)) {
                 stopPolling();
@@ -306,6 +398,70 @@ const progressText = computed(() => {
 
     return `${progress.value.processed_items}/${progress.value.total_items} processed`;
 });
+
+const editFormEntries = computed(() => Object.entries(editForm));
+
+const canEditItem = (item: BatchItem) => !['queued', 'processing'].includes(item.status);
+
+const resetEditForm = () => {
+    for (const key of Object.keys(editForm)) {
+        delete editForm[key];
+    }
+};
+
+const openEditDialog = (item: BatchItem) => {
+    editingItem.value = item;
+    editDialogOpen.value = true;
+    editErrorMessage.value = null;
+    editErrors.value = {};
+    resetEditForm();
+
+    for (const [key, value] of Object.entries(item.row_data)) {
+        editForm[key] = value;
+    }
+};
+
+const closeEditDialog = () => {
+    editDialogOpen.value = false;
+    editingItem.value = null;
+    editErrorMessage.value = null;
+    editErrors.value = {};
+    resetEditForm();
+};
+
+const saveEditedItem = async () => {
+    if (!activeBatchId.value || !editingItem.value) {
+        return;
+    }
+
+    editSubmitting.value = true;
+    editErrorMessage.value = null;
+    editErrors.value = {};
+
+    try {
+        await sendJson<BatchItem>(
+            documentGeneratorRoutes.batches.items.update.url({
+                batch: activeBatchId.value,
+                item: editingItem.value.id,
+            }),
+            'PUT',
+            {
+                row_data: editForm,
+            },
+        );
+
+        await Promise.all([loadProgress(), loadBatchItems(itemsData.value.current_page), loadActivityLogs(1), loadHistory(1)]);
+        startPolling();
+        closeEditDialog();
+    } catch (error) {
+        if (error instanceof Error && 'validationErrors' in error) {
+            editErrors.value = (error as Error & { validationErrors?: Record<string, string[]> }).validationErrors ?? {};
+        }
+        editErrorMessage.value = error instanceof Error ? error.message : 'Unable to update row.';
+    } finally {
+        editSubmitting.value = false;
+    }
+};
 
 const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
     {
@@ -337,10 +493,20 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
     },
     {
         id: 'actions',
-        header: 'Download',
+        header: 'Actions',
         enableSorting: false,
         cell: ({ row }) =>
             h('div', { class: 'flex items-center gap-2' }, [
+                h(
+                    Button,
+                    {
+                        variant: 'outline',
+                        size: 'sm',
+                        disabled: !canEditItem(row.original),
+                        onClick: () => openEditDialog(row.original),
+                    },
+                    () => 'Edit',
+                ),
                 row.original.docx_available
                     ? h(
                         'a',
@@ -373,6 +539,41 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
                       )
                     : h('span', { class: 'text-muted-foreground text-sm' }, 'PDF'),
             ]),
+    },
+]);
+
+const activityColumns = computed<ColumnDef<ActivityLog>[]>(() => [
+    {
+        id: 'created_at',
+        accessorKey: 'created_at',
+        header: 'When',
+        enableSorting: false,
+        cell: ({ row }) => row.original.created_at ? new Date(row.original.created_at).toLocaleString() : '-',
+    },
+    {
+        id: 'user',
+        header: 'User',
+        enableSorting: false,
+        cell: ({ row }) => row.original.user?.name ?? 'System',
+    },
+    {
+        id: 'row_number',
+        accessorKey: 'row_number',
+        header: 'Row',
+        enableSorting: false,
+        cell: ({ row }) => row.original.row_number ?? '-',
+    },
+    {
+        id: 'action',
+        accessorKey: 'action',
+        header: 'Action',
+        enableSorting: false,
+    },
+    {
+        id: 'summary',
+        accessorKey: 'summary',
+        header: 'Summary',
+        enableSorting: false,
     },
 ]);
 
@@ -427,7 +628,7 @@ const historyColumns = computed<ColumnDef<HistoryBatch>[]>(() => [
                     size: 'sm',
                     onClick: async () => {
                         activeBatchId.value = row.original.id;
-                        await Promise.all([loadProgress(), loadBatchItems(1)]);
+                        await Promise.all([loadProgress(), loadBatchItems(1), loadActivityLogs(1)]);
                         if (progress.value && !['completed', 'failed'].includes(progress.value.status)) {
                             startPolling();
                         } else {
@@ -519,7 +720,7 @@ onBeforeUnmount(() => {
             <Card>
                 <CardHeader>
                     <CardTitle>Batch Items</CardTitle>
-                    <CardDescription>Per-row output status and downloads for the selected batch.</CardDescription>
+                    <CardDescription>Per-row output status, editing, and downloads for the selected batch.</CardDescription>
                 </CardHeader>
                 <CardContent class="space-y-4">
                     <div class="max-w-[220px]">
@@ -550,6 +751,19 @@ onBeforeUnmount(() => {
 
             <Card>
                 <CardHeader>
+                    <CardTitle>Transaction Log</CardTitle>
+                    <CardDescription>Shared activity for edits, regenerations, and validation failures.</CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <DataTable :columns="activityColumns" :data="activityData.data" :meta="activityData"
+                        :loading="activityLoading" sort-by="created_at" sort-direction="desc"
+                        empty-message="No activity recorded for the selected batch." @page-change="loadActivityLogs"
+                        @per-page-change="async (perPage) => { activityData.per_page = perPage; await loadActivityLogs(1); }" />
+                </CardContent>
+            </Card>
+
+            <Card>
+                <CardHeader>
                     <CardTitle>Batch History</CardTitle>
                     <CardDescription>Paginated backend history of generated batches.</CardDescription>
                 </CardHeader>
@@ -561,6 +775,39 @@ onBeforeUnmount(() => {
                         @sort-change="async (column, direction) => { historySortBy = column; historySortDirection = direction; await loadHistory(1); }" />
                 </CardContent>
             </Card>
+
+            <Dialog :open="editDialogOpen" @update:open="(open) => { if (!open) closeEditDialog(); }">
+                <DialogContent class="sm:max-w-2xl">
+                    <DialogHeader>
+                        <DialogTitle>Edit Row {{ editingItem?.row_number ?? '-' }}</DialogTitle>
+                        <DialogDescription>
+                            Update the row data and regenerate documents. Old outputs will be deleted first.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div class="grid max-h-[60vh] gap-4 overflow-y-auto py-2">
+                        <div v-for="[key] in editFormEntries" :key="key" class="grid gap-2">
+                            <Label :for="`edit-${key}`">{{ key }}</Label>
+                            <Input :id="`edit-${key}`" v-model="editForm[key]" type="text" />
+                            <p v-if="editErrors[`row_data.${key}`]" class="text-sm text-destructive">
+                                {{ editErrors[`row_data.${key}`][0] }}
+                            </p>
+                        </div>
+                    </div>
+
+                    <p v-if="editErrorMessage" class="text-sm text-destructive">
+                        {{ editErrorMessage }}
+                    </p>
+
+                    <DialogFooter>
+                        <Button variant="outline" @click="closeEditDialog">Cancel</Button>
+                        <Button :disabled="editSubmitting" @click="saveEditedItem">
+                            <Spinner v-if="editSubmitting" class="size-4" />
+                            Save and Regenerate
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
     </AppLayout>
 </template>
