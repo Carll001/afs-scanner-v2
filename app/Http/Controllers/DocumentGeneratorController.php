@@ -30,6 +30,20 @@ class DocumentGeneratorController extends Controller
         ]);
     }
 
+    public function generatedFiles(Request $request): Response
+    {
+        return Inertia::render('GeneratedFiles', [
+            'initialHistory' => $this->historyPayload($request, null),
+        ]);
+    }
+
+    public function generatedFilesBatch(Request $request, DocumentBatch $batch): Response
+    {
+        return Inertia::render('GeneratedBatchItems', [
+            'batch' => $this->historyBatchPayload($batch),
+        ]);
+    }
+
     public function store(
         DocumentBatchStoreRequest $request,
         ExcelExtractionService $excelExtractionService
@@ -369,21 +383,27 @@ class DocumentGeneratorController extends Controller
             ->documentBatches()
             ->orderBy($sortBy, $sortDirection)
             ->paginate($perPage)
-            ->through(function (DocumentBatch $batch): array {
-                return [
-                    'id' => $batch->id,
-                    'source_excel_name' => $batch->source_excel_name,
-                    'template_name' => $batch->template_name,
-                    'status' => $batch->status,
-                    'total_items' => $batch->total_items,
-                    'processed_items' => $batch->processed_items,
-                    'success_items' => $batch->success_items,
-                    'failed_items' => $batch->failed_items,
-                    'created_at' => $batch->created_at?->toISOString(),
-                    'completed_at' => $batch->completed_at?->toISOString(),
-                ];
-            })
+            ->through(fn (DocumentBatch $batch): array => $this->historyBatchPayload($batch))
             ->toArray();
+    }
+
+    /**
+     * @return array<string, int|string|null>
+     */
+    private function historyBatchPayload(DocumentBatch $batch): array
+    {
+        return [
+            'id' => $batch->id,
+            'source_excel_name' => $batch->source_excel_name,
+            'template_name' => $batch->template_name,
+            'status' => $batch->status,
+            'total_items' => $batch->total_items,
+            'processed_items' => $batch->processed_items,
+            'success_items' => $batch->success_items,
+            'failed_items' => $batch->failed_items,
+            'created_at' => $batch->created_at?->toISOString(),
+            'completed_at' => $batch->completed_at?->toISOString(),
+        ];
     }
 
     /**

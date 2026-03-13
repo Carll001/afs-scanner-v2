@@ -13,6 +13,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
 
     Route::get('document-generator', [DocumentGeneratorController::class, 'index'])
         ->name('document-generator.index');
+    Route::get('generated-files', [DocumentGeneratorController::class, 'generatedFiles'])
+        ->name('generated-files.index');
+    Route::get('generated-files/{batch}', [DocumentGeneratorController::class, 'generatedFilesBatch'])
+        ->name('generated-files.show');
     Route::post('document-generator/batches', [DocumentGeneratorController::class, 'store'])
         ->name('document-generator.batches.store');
     Route::get('document-generator/batches/history', [DocumentGeneratorController::class, 'history'])

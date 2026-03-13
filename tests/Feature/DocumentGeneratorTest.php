@@ -23,6 +23,7 @@ class DocumentGeneratorTest extends TestCase
     public function test_guests_cannot_access_document_generator_routes(): void
     {
         $this->get(route('document-generator.index'))->assertRedirect(route('login'));
+        $this->get(route('generated-files.index'))->assertRedirect(route('login'));
         $this->post(route('document-generator.batches.store'))->assertRedirect(route('login'));
     }
 
@@ -122,6 +123,51 @@ class DocumentGeneratorTest extends TestCase
 
         $this->get(route('document-generator.batches.items.download', [$batch, $item, 'pdf']))
             ->assertOk();
+    }
+
+    public function test_authenticated_user_can_view_generated_files_batch_folder_page(): void
+    {
+        $user = User::factory()->create();
+        $batch = DocumentBatch::factory()->for($user)->create([
+            'status' => 'completed',
+            'success_items' => 1,
+        ]);
+
+        $this->actingAs($user);
+
+        $this->get(route('generated-files.index'))
+            ->assertOk()
+            ->assertSee('GeneratedFiles')
+            ->assertSee($batch->source_excel_name);
+    }
+
+    public function test_authenticated_user_can_view_generated_files_batch_items_page(): void
+    {
+        $user = User::factory()->create();
+        $batch = DocumentBatch::factory()->for($user)->create([
+            'status' => 'completed',
+            'total_items' => 1,
+            'success_items' => 1,
+            'processed_items' => 1,
+        ]);
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'pdf_done',
+            'docx_path' => "document-generator/{$user->id}/batch-{$batch->id}/row-2.docx",
+            'pdf_path' => "document-generator/{$user->id}/batch-{$batch->id}/row-2.pdf",
+        ]);
+
+        Storage::fake('local');
+        Storage::disk('local')->put($item->docx_path, 'docx-content');
+        Storage::disk('local')->put($item->pdf_path, 'pdf-content');
+
+        $this->actingAs($user);
+
+        $this->get(route('generated-files.show', $batch))
+            ->assertOk()
+            ->assertSee('GeneratedBatchItems')
+            ->assertSee($batch->source_excel_name)
+            ->assertSee((string) $batch->id);
     }
 
     public function test_job_allows_generation_when_placeholder_has_no_matching_header(): void
