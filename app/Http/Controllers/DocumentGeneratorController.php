@@ -30,6 +30,11 @@ class DocumentGeneratorController extends Controller
         ]);
     }
 
+    public function transactionLog(Request $request): Response
+    {
+        return Inertia::render('TransactionLog');
+    }
+
     public function generatedFiles(Request $request): Response
     {
         return Inertia::render('GeneratedFiles', [
@@ -319,6 +324,8 @@ class DocumentGeneratorController extends Controller
 
     public function logs(Request $request, DocumentBatch $batch): JsonResponse
     {
+        $this->assertBatchOwnership($request, $batch);
+
         if (! Schema::hasTable('document_batch_item_activity_logs')) {
             return response()->json([
                 'current_page' => 1,
@@ -351,6 +358,53 @@ class DocumentGeneratorController extends Controller
                     'user' => $log->user ? [
                         'id' => $log->user->id,
                         'name' => $log->user->name,
+                    ] : null,
+                ];
+            });
+
+        return response()->json($logs);
+    }
+
+    public function transactionLogs(Request $request): JsonResponse
+    {
+        if (! Schema::hasTable('document_batch_item_activity_logs')) {
+            return response()->json([
+                'current_page' => 1,
+                'data' => [],
+                'last_page' => 1,
+                'per_page' => 10,
+                'total' => 0,
+            ]);
+        }
+
+        $validated = $request->validate([
+            'per_page' => ['nullable', 'integer', 'min:5', 'max:100'],
+        ]);
+
+        $perPage = (int) ($validated['per_page'] ?? 10);
+
+        $logs = DocumentBatchItemActivityLog::query()
+            ->with(['batch:id,user_id,source_excel_name', 'item:id,row_number', 'user:id,name'])
+            ->whereHas('batch', static function (Builder $query) use ($request): void {
+                $query->where('user_id', $request->user()->id);
+            })
+            ->latest()
+            ->paginate($perPage)
+            ->through(static function (DocumentBatchItemActivityLog $log): array {
+                return [
+                    'id' => $log->id,
+                    'action' => $log->action,
+                    'summary' => $log->summary,
+                    'details' => $log->details ?? [],
+                    'created_at' => $log->created_at?->toISOString(),
+                    'row_number' => $log->item?->row_number,
+                    'user' => $log->user ? [
+                        'id' => $log->user->id,
+                        'name' => $log->user->name,
+                    ] : null,
+                    'batch' => $log->batch ? [
+                        'id' => $log->batch->id,
+                        'source_excel_name' => $log->batch->source_excel_name,
                     ] : null,
                 ];
             });
