@@ -1,7 +1,21 @@
 <script setup lang="ts">
 import type { ColumnDef } from '@tanstack/vue-table';
-import { Eye, FileText, MoreVertical, Pencil, Printer } from 'lucide-vue-next';
+import {
+    CheckCircle2,
+    Eye,
+    FileText,
+    Loader2,
+    MoreVertical,
+    Pencil,
+    Printer,
+    TriangleAlert,
+} from 'lucide-vue-next';
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import {
+    Alert,
+    AlertDescription,
+    AlertTitle,
+} from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -35,7 +49,6 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
-import { Spinner } from '@/components/ui/spinner';
 import documentGeneratorRoutes from '@/routes/document-generator';
 
 type SortDirection = 'asc' | 'desc';
@@ -51,6 +64,16 @@ type BatchSummary = {
     failed_items: number;
     created_at: string | null;
     completed_at: string | null;
+};
+
+type BatchProgress = {
+    batch_id: number;
+    status: string;
+    total_items: number;
+    processed_items: number;
+    success_items: number;
+    failed_items: number;
+    progress_percent: number;
 };
 
 type BatchItem = {
@@ -78,6 +101,25 @@ const props = defineProps<{
     batch: BatchSummary;
 }>();
 
+const batchProgress = ref<BatchProgress>({
+    batch_id: props.batch.id,
+    status: props.batch.status,
+    total_items: props.batch.total_items,
+    processed_items: props.batch.processed_items,
+    success_items: props.batch.success_items,
+    failed_items: props.batch.failed_items,
+    progress_percent:
+        props.batch.total_items === 0
+            ? 100
+            : Math.min(
+                  100,
+                  Math.floor(
+                      (props.batch.processed_items /
+                          Math.max(props.batch.total_items, 1)) *
+                          100,
+                  ),
+              ),
+});
 const itemsData = ref<PaginatedResponse<BatchItem>>({
     current_page: 1,
     data: [],
@@ -98,11 +140,18 @@ const editErrorMessage = ref<string | null>(null);
 const editErrors = ref<Record<string, string[]>>({});
 const editingItem = ref<BatchItem | null>(null);
 const editForm = reactive<Record<string, string>>({});
+const regeneratingItemIds = ref<number[]>([]);
+const inlineNotice = ref<{
+    variant: 'default' | 'destructive';
+    title: string;
+    message: string;
+} | null>(null);
 
 let companySearchDebounce: ReturnType<typeof setTimeout> | null = null;
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let printFrame: HTMLIFrameElement | null = null;
 let printCleanupTimeout: ReturnType<typeof setTimeout> | null = null;
+let inlineNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
 
 const csrfToken = () => {
     const xsrfCookie = document.cookie
@@ -171,6 +220,14 @@ const sendJson = async <T,>(
     return (await response.json()) as T;
 };
 
+const loadBatchProgress = async () => {
+    batchProgress.value = await getApi<BatchProgress>(
+        documentGeneratorRoutes.batches.progress.url({
+            batch: props.batch.id,
+        }),
+    );
+};
+
 const loadBatchItems = async (page = itemsData.value.current_page) => {
     itemsLoading.value = true;
 
@@ -198,6 +255,7 @@ const loadBatchItems = async (page = itemsData.value.current_page) => {
             ),
         );
 
+        reconcileRegeneratingItems(itemsData.value.data);
         syncPolling();
     } finally {
         itemsLoading.value = false;
@@ -222,7 +280,11 @@ const statusBadgeVariant = (
     return 'outline';
 };
 
+const isItemRegenerating = (itemId: number) =>
+    regeneratingItemIds.value.includes(itemId);
+
 const canEditItem = (item: BatchItem) =>
+    !isItemRegenerating(item.id) &&
     !['queued', 'processing'].includes(item.status);
 
 const resetEditForm = () => {
@@ -260,10 +322,63 @@ const stopPolling = () => {
     }
 };
 
+const showInlineNotice = (
+    variant: 'default' | 'destructive',
+    title: string,
+    message: string,
+) => {
+    inlineNotice.value = {
+        variant,
+        title,
+        message,
+    };
+
+    if (inlineNoticeTimeout) {
+        clearTimeout(inlineNoticeTimeout);
+    }
+
+    inlineNoticeTimeout = setTimeout(() => {
+        inlineNotice.value = null;
+        inlineNoticeTimeout = null;
+    }, 5000);
+};
+
+const reconcileRegeneratingItems = (items: BatchItem[]) => {
+    regeneratingItemIds.value = regeneratingItemIds.value.filter((id) => {
+        const item = items.find((entry) => entry.id === id);
+
+        if (!item) {
+            return false;
+        }
+
+        if (item.status === 'failed') {
+            showInlineNotice(
+                'destructive',
+                `Row ${item.row_number} regeneration failed`,
+                item.error_message ?? 'Please review the row and try again.',
+            );
+            return false;
+        }
+
+        if (item.status === 'pdf_done') {
+            showInlineNotice(
+                'default',
+                `Row ${item.row_number} regeneration completed`,
+                'The updated files are ready to use.',
+            );
+            return false;
+        }
+
+        return ['queued', 'processing', 'docx_done'].includes(item.status);
+    });
+};
+
 const syncPolling = () => {
-    const shouldPoll = itemsData.value.data.some((item) =>
-        ['queued', 'processing'].includes(item.status),
-    );
+    const shouldPoll =
+        regeneratingItemIds.value.length > 0 ||
+        itemsData.value.data.some((item) =>
+            ['queued', 'processing', 'docx_done'].includes(item.status),
+        );
 
     if (!shouldPoll) {
         stopPolling();
@@ -277,7 +392,7 @@ const syncPolling = () => {
 
     pollingActive.value = true;
     pollInterval = setInterval(() => {
-        void loadBatchItems();
+        void Promise.all([loadBatchItems(), loadBatchProgress()]);
     }, 2000);
 };
 
@@ -299,12 +414,53 @@ const onCompanySearchInput = (event: Event) => {
     }, 300);
 };
 
+const optimisticQueueItem = (itemId: number, rowData: Record<string, string>) => {
+    itemsData.value = {
+        ...itemsData.value,
+        data: itemsData.value.data.map((item) =>
+            item.id === itemId
+                ? {
+                      ...item,
+                      row_data: { ...rowData },
+                      status: 'queued',
+                      docx_available: false,
+                      pdf_available: false,
+                      error_message: null,
+                      updated_at: new Date().toISOString(),
+                  }
+                : item,
+        ),
+    };
+};
+
+const summaryStats = computed(() => {
+    const total = batchProgress.value.total_items;
+    const done = batchProgress.value.success_items;
+    const failed = batchProgress.value.failed_items;
+    const withPdf = batchProgress.value.success_items;
+    const withoutPdf = Math.max(0, total - withPdf);
+    const inProgress = Math.max(0, total - done - failed);
+
+    return [
+        { label: 'Total', value: total },
+        { label: 'Done', value: done },
+        { label: 'Failed', value: failed },
+        { label: 'In Progress', value: inProgress },
+        { label: 'With PDF', value: withPdf },
+        { label: 'Without PDF', value: withoutPdf },
+    ];
+});
+
 const editFormEntries = computed(() => Object.entries(editForm));
 
 const saveEditedItem = async () => {
     if (!editingItem.value) {
         return;
     }
+
+    const itemId = editingItem.value.id;
+    const rowNumber = editingItem.value.row_number;
+    const queuedRowData = { ...editForm };
 
     editSubmitting.value = true;
     editErrorMessage.value = null;
@@ -322,7 +478,21 @@ const saveEditedItem = async () => {
             },
         );
 
-        await loadBatchItems(itemsData.value.current_page);
+        if (!regeneratingItemIds.value.includes(itemId)) {
+            regeneratingItemIds.value = [...regeneratingItemIds.value, itemId];
+        }
+
+        optimisticQueueItem(itemId, queuedRowData);
+        showInlineNotice(
+            'default',
+            `Row ${rowNumber} saved`,
+            'Regeneration started. Updated files will appear automatically.',
+        );
+
+        await Promise.all([
+            loadBatchItems(itemsData.value.current_page),
+            loadBatchProgress(),
+        ]);
         syncPolling();
         closeEditDialog();
     } catch (error) {
@@ -337,6 +507,12 @@ const saveEditedItem = async () => {
 
         editErrorMessage.value =
             error instanceof Error ? error.message : 'Unable to update row.';
+
+        showInlineNotice(
+            'destructive',
+            `Row ${rowNumber} was not updated`,
+            error instanceof Error ? error.message : 'Unable to update row.',
+        );
     } finally {
         editSubmitting.value = false;
     }
@@ -425,11 +601,26 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
         enableSorting: true,
         cell: ({ row }) =>
             h(
-                Badge,
-                {
-                    variant: statusBadgeVariant(row.original.status),
-                },
-                () => row.original.status,
+                'div',
+                { class: 'flex items-center gap-2' },
+                [
+                    isItemRegenerating(row.original.id)
+                        ? h(Loader2, {
+                              class: 'size-3.5 animate-spin text-muted-foreground',
+                          })
+                        : null,
+                    h(
+                        Badge,
+                        {
+                            variant: statusBadgeVariant(row.original.status),
+                        },
+                        () =>
+                            isItemRegenerating(row.original.id) &&
+                            row.original.status === 'queued'
+                                ? 'regenerating'
+                                : row.original.status,
+                    ),
+                ],
             ),
     },
     {
@@ -453,7 +644,8 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
                         variant: 'ghost',
                         size: 'icon',
                         class: 'size-8',
-                        disabled: !item.pdf_available,
+                        disabled:
+                            !item.pdf_available || isItemRegenerating(item.id),
                         'aria-label': 'Print PDF',
                         title: item.pdf_available ? 'Print PDF' : 'Print unavailable',
                         onClick: () => printItemPdf(item),
@@ -526,7 +718,12 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
                                         item.docx_available
                                             ? h(
                                                   DropdownMenuItem,
-                                                  { asChild: true },
+                                                  {
+                                                      asChild: true,
+                                                      disabled: isItemRegenerating(
+                                                          item.id,
+                                                      ),
+                                                  },
                                                   {
                                                       default: () =>
                                                           h(
@@ -564,7 +761,12 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
                                         item.pdf_available
                                             ? h(
                                                   DropdownMenuItem,
-                                                  { asChild: true },
+                                                  {
+                                                      asChild: true,
+                                                      disabled: isItemRegenerating(
+                                                          item.id,
+                                                      ),
+                                                  },
                                                   {
                                                       default: () =>
                                                           h(
@@ -616,12 +818,16 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
 ]);
 
 onMounted(() => {
-    void loadBatchItems(1);
+    void Promise.all([loadBatchItems(1), loadBatchProgress()]);
 });
 
 onBeforeUnmount(() => {
     stopPolling();
     cleanupPrintFrame();
+
+    if (inlineNoticeTimeout) {
+        clearTimeout(inlineNoticeTimeout);
+    }
 
     if (companySearchDebounce) {
         clearTimeout(companySearchDebounce);
@@ -632,15 +838,41 @@ onBeforeUnmount(() => {
 <template>
     <Card>
         <CardHeader>
-            <CardTitle class="flex items-center gap-2">
-                Batch #{{ batch.id }} Files
-                <Spinner v-if="pollingActive" class="size-4" />
-            </CardTitle>
+            <CardTitle>Batch #{{ batch.id }} Files</CardTitle>
             <CardDescription>
                 {{ batch.source_excel_name }} using {{ batch.template_name }}
             </CardDescription>
         </CardHeader>
         <CardContent class="space-y-4">
+            <Alert v-if="inlineNotice" :variant="inlineNotice.variant">
+                <CheckCircle2
+                    v-if="inlineNotice.variant === 'default'"
+                    class="size-4"
+                />
+                <TriangleAlert v-else class="size-4" />
+                <AlertTitle>{{ inlineNotice.title }}</AlertTitle>
+                <AlertDescription>
+                    {{ inlineNotice.message }}
+                </AlertDescription>
+            </Alert>
+
+            <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+                <div
+                    v-for="stat in summaryStats"
+                    :key="stat.label"
+                    class="rounded-xl border bg-muted/30 p-4"
+                >
+                    <p
+                        class="text-xs font-medium tracking-wide text-muted-foreground uppercase"
+                    >
+                        {{ stat.label }}
+                    </p>
+                    <p class="mt-2 text-2xl font-semibold tracking-tight">
+                        {{ stat.value }}
+                    </p>
+                </div>
+            </div>
+
             <div class="grid gap-4 md:grid-cols-[220px_minmax(0,320px)]">
                 <div class="max-w-[220px]">
                     <Label class="mb-2 block">Filter by status</Label>
