@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ColumnDef } from '@tanstack/vue-table';
+import { Eye, FileText, MoreVertical, Pencil, Printer } from 'lucide-vue-next';
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -19,6 +20,12 @@ import {
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -94,6 +101,8 @@ const editForm = reactive<Record<string, string>>({});
 
 let companySearchDebounce: ReturnType<typeof setTimeout> | null = null;
 let pollInterval: ReturnType<typeof setInterval> | null = null;
+let printFrame: HTMLIFrameElement | null = null;
+let printCleanupTimeout: ReturnType<typeof setTimeout> | null = null;
 
 const csrfToken = () => {
     const xsrfCookie = document.cookie
@@ -333,6 +342,68 @@ const saveEditedItem = async () => {
     }
 };
 
+const pdfUrlForItem = (item: BatchItem) =>
+    documentGeneratorRoutes.batches.items.download.url({
+        batch: props.batch.id,
+        item: item.id,
+        type: 'pdf',
+    });
+
+const cleanupPrintFrame = () => {
+    if (printCleanupTimeout) {
+        clearTimeout(printCleanupTimeout);
+        printCleanupTimeout = null;
+    }
+
+    printFrame?.remove();
+    printFrame = null;
+};
+
+const printItemPdf = (item: BatchItem) => {
+    if (!item.pdf_available) {
+        return;
+    }
+
+    cleanupPrintFrame();
+
+    const iframe = document.createElement('iframe');
+    iframe.src = pdfUrlForItem(item);
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '1px';
+    iframe.style.height = '1px';
+    iframe.style.opacity = '0';
+    iframe.style.pointerEvents = 'none';
+    iframe.style.border = '0';
+
+    iframe.addEventListener('load', () => {
+        window.setTimeout(() => {
+            const frameWindow = iframe.contentWindow;
+            frameWindow?.focus();
+            frameWindow?.print();
+            frameWindow?.addEventListener('afterprint', cleanupPrintFrame, {
+                once: true,
+            });
+        }, 400);
+    });
+
+    printCleanupTimeout = setTimeout(() => {
+        cleanupPrintFrame();
+    }, 60000);
+
+    printFrame = iframe;
+    document.body.append(iframe);
+};
+
+const docxUrlForItem = (item: BatchItem) =>
+    documentGeneratorRoutes.batches.items.download.url({
+        batch: props.batch.id,
+        item: item.id,
+        type: 'docx',
+    });
+
 const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
     {
         id: 'row_number',
@@ -372,61 +443,175 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
         id: 'actions',
         header: 'Actions',
         enableSorting: false,
-        cell: ({ row }) =>
-            h('div', { class: 'flex items-center gap-2' }, [
+        cell: ({ row }) => {
+            const item = row.original;
+
+            return h('div', { class: 'flex items-center gap-1' }, [
                 h(
                     Button,
                     {
-                        variant: 'outline',
-                        size: 'sm',
-                        disabled: !canEditItem(row.original),
-                        onClick: () => openEditDialog(row.original),
+                        variant: 'ghost',
+                        size: 'icon',
+                        class: 'size-8',
+                        disabled: !item.pdf_available,
+                        'aria-label': 'Print PDF',
+                        title: item.pdf_available ? 'Print PDF' : 'Print unavailable',
+                        onClick: () => printItemPdf(item),
                     },
-                    () => 'Edit',
+                    {
+                        default: () =>
+                            h(Printer, {
+                                class: 'size-4',
+                            }),
+                    },
                 ),
-                row.original.docx_available
-                    ? h(
-                          'a',
-                          {
-                              href: documentGeneratorRoutes.batches.items.download.url(
-                                  {
-                                      batch: props.batch.id,
-                                      item: row.original.id,
-                                      type: 'docx',
-                                  },
-                              ),
-                              class: 'text-primary text-sm underline',
-                          },
-                          'DOCX',
-                      )
-                    : h(
-                          'span',
-                          { class: 'text-muted-foreground text-sm' },
-                          'DOCX',
-                      ),
-                row.original.pdf_available
-                    ? h(
-                          'a',
-                          {
-                              href: documentGeneratorRoutes.batches.items.download.url(
-                                  {
-                                      batch: props.batch.id,
-                                      item: row.original.id,
-                                      type: 'pdf',
-                                  },
-                              ),
-                              class: 'text-primary text-sm underline',
-                              target: '_blank',
-                              rel: 'noopener noreferrer',
-                          },
-                          'Preview PDF',
-                      )
-                    : h(
-                          'span',
-                          { class: 'text-muted-foreground text-sm' },
-                          'PDF',
-                      ),
-            ]),
+                h(
+                    DropdownMenu,
+                    {},
+                    {
+                        default: () => [
+                            h(
+                                DropdownMenuTrigger,
+                                { asChild: true },
+                                {
+                                    default: () =>
+                                        h(
+                                            Button,
+                                            {
+                                                variant: 'outline',
+                                                size: 'icon',
+                                                class: 'size-8',
+                                                'aria-label': 'More actions',
+                                                title: 'More actions',
+                                            },
+                                            {
+                                                default: () =>
+                                                    h(MoreVertical, {
+                                                        class: 'size-4',
+                                                    }),
+                                            },
+                                        ),
+                                },
+                            ),
+                            h(
+                                DropdownMenuContent,
+                                { align: 'end', class: 'w-44' },
+                                {
+                                    default: () => [
+                                        h(
+                                            DropdownMenuItem,
+                                            {
+                                                disabled: !canEditItem(item),
+                                                onSelect: (
+                                                    event: Event,
+                                                ) => {
+                                                    event.preventDefault();
+
+                                                    if (!canEditItem(item)) {
+                                                        return;
+                                                    }
+
+                                                    openEditDialog(item);
+                                                },
+                                            },
+                                            {
+                                                default: () => [
+                                                    h(Pencil, {
+                                                        class: 'size-4',
+                                                    }),
+                                                    h('span', 'Edit'),
+                                                ],
+                                            },
+                                        ),
+                                        item.docx_available
+                                            ? h(
+                                                  DropdownMenuItem,
+                                                  { asChild: true },
+                                                  {
+                                                      default: () =>
+                                                          h(
+                                                              'a',
+                                                              {
+                                                                  class: 'flex items-center gap-2',
+                                                                  href: docxUrlForItem(
+                                                                      item,
+                                                                  ),
+                                                              },
+                                                              [
+                                                                  h(FileText, {
+                                                                      class: 'size-4',
+                                                                  }),
+                                                                  h(
+                                                                      'span',
+                                                                      'DOCX',
+                                                                  ),
+                                                              ],
+                                                          ),
+                                                  },
+                                              )
+                                            : h(
+                                                  DropdownMenuItem,
+                                                  { disabled: true },
+                                                  {
+                                                      default: () => [
+                                                          h(FileText, {
+                                                              class: 'size-4',
+                                                          }),
+                                                          h('span', 'DOCX'),
+                                                      ],
+                                                  },
+                                              ),
+                                        item.pdf_available
+                                            ? h(
+                                                  DropdownMenuItem,
+                                                  { asChild: true },
+                                                  {
+                                                      default: () =>
+                                                          h(
+                                                              'a',
+                                                              {
+                                                                  class: 'flex items-center gap-2',
+                                                                  href: pdfUrlForItem(
+                                                                      item,
+                                                                  ),
+                                                                  target: '_blank',
+                                                                  rel: 'noopener noreferrer',
+                                                              },
+                                                              [
+                                                                  h(Eye, {
+                                                                      class: 'size-4',
+                                                                  }),
+                                                                  h(
+                                                                      'span',
+                                                                      'Preview PDF',
+                                                                  ),
+                                                              ],
+                                                          ),
+                                                  },
+                                              )
+                                            : h(
+                                                  DropdownMenuItem,
+                                                  { disabled: true },
+                                                  {
+                                                      default: () => [
+                                                          h(Eye, {
+                                                              class: 'size-4',
+                                                          }),
+                                                          h(
+                                                              'span',
+                                                              'Preview PDF',
+                                                          ),
+                                                      ],
+                                                  },
+                                              ),
+                                    ],
+                                },
+                            ),
+                        ],
+                    },
+                ),
+            ]);
+        },
     },
 ]);
 
@@ -436,6 +621,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
     stopPolling();
+    cleanupPrintFrame();
 
     if (companySearchDebounce) {
         clearTimeout(companySearchDebounce);
