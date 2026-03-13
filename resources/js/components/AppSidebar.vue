@@ -6,6 +6,7 @@ import {
     FolderGit2,
     FolderOpen,
     LayoutGrid,
+    ScrollText,
 } from 'lucide-vue-next';
 import AppLogo from '@/components/AppLogo.vue';
 import NavFooter from '@/components/NavFooter.vue';
@@ -39,6 +40,11 @@ const mainNavItems: NavItem[] = [
         title: 'Generated Files',
         href: '/generated-files',
         icon: FolderOpen,
+    },
+    {
+        title: 'Transaction Log',
+        href: '/transaction-log',
+        icon: ScrollText,
     },
 ];
 

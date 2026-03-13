@@ -11,6 +11,11 @@ Route::inertia('/', 'Welcome', [
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::inertia('dashboard', 'Dashboard')->name('dashboard');
 
+    Route::get('transaction-log', [DocumentGeneratorController::class, 'transactionLog'])
+        ->name('transaction-log.index');
+    Route::get('transaction-log/logs', [DocumentGeneratorController::class, 'transactionLogs'])
+        ->name('transaction-log.logs');
+
     Route::get('document-generator', [DocumentGeneratorController::class, 'index'])
         ->name('document-generator.index');
     Route::get('generated-files', [DocumentGeneratorController::class, 'generatedFiles'])
