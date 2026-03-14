@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Str;
 
 class DocumentBatchItemActivityLog extends Model
 {
@@ -15,6 +16,7 @@ class DocumentBatchItemActivityLog extends Model
      * @var list<string>
      */
     protected $fillable = [
+        'uuid',
         'document_batch_id',
         'document_batch_item_id',
         'user_id',
@@ -22,6 +24,15 @@ class DocumentBatchItemActivityLog extends Model
         'summary',
         'details',
     ];
+
+    protected static function booted(): void
+    {
+        static::creating(static function (self $log): void {
+            if (! is_string($log->uuid) || $log->uuid === '') {
+                $log->uuid = (string) Str::uuid();
+            }
+        });
+    }
 
     /**
      * @return array<string, string>

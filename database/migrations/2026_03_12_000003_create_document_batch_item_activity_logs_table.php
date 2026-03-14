@@ -13,6 +13,7 @@ return new class extends Migration
     {
         Schema::create('document_batch_item_activity_logs', function (Blueprint $table): void {
             $table->id();
+            $table->uuid('uuid')->unique();
             $table->foreignId('document_batch_id')->constrained()->cascadeOnDelete();
             $table->foreignId('document_batch_item_id')->constrained('document_batch_items')->cascadeOnDelete();
             $table->foreignId('user_id')->nullable()->constrained()->nullOnDelete();

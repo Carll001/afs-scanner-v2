@@ -21,6 +21,7 @@ import {
 
 type HistoryBatch = {
     id: number;
+    uuid: string;
     source_excel_name: string;
     template_name: string;
     status: string;
@@ -133,7 +134,7 @@ const formatDate = (dateStr: string | null) => {
                 <Link
                     v-for="batch in historyData.data"
                     :key="batch.id"
-                    :href="`/generated-files/${batch.id}`"
+                    :href="`/generated-files/${batch.uuid}`"
                     class="group relative block overflow-hidden rounded-xl border bg-card p-5 transition-all hover:border-primary/50 hover:ring-2 hover:ring-primary/20"
                 >
                     <div

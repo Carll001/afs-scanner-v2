@@ -13,6 +13,7 @@ return new class extends Migration
     {
         Schema::create('document_batch_items', function (Blueprint $table): void {
             $table->id();
+            $table->uuid('uuid')->unique();
             $table->foreignId('document_batch_id')->constrained()->cascadeOnDelete();
             $table->unsignedInteger('row_number');
             $table->json('row_data');
@@ -24,6 +25,7 @@ return new class extends Migration
             $table->timestamp('completed_at')->nullable();
             $table->timestamps();
 
+            $table->index(['document_batch_id', 'uuid']);
             $table->index(['document_batch_id', 'row_number']);
             $table->index(['document_batch_id', 'status']);
         });

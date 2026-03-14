@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Str;
 
 class DocumentBatch extends Model
 {
@@ -31,6 +32,15 @@ class DocumentBatch extends Model
         'started_at',
         'completed_at',
     ];
+
+    protected static function booted(): void
+    {
+        static::creating(static function (self $batch): void {
+            if (! is_string($batch->uuid) || $batch->uuid === '') {
+                $batch->uuid = (string) Str::uuid();
+            }
+        });
+    }
 
     /**
      * @return array<string, string>

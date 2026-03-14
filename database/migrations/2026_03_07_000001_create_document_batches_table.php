@@ -13,6 +13,7 @@ return new class extends Migration
     {
         Schema::create('document_batches', function (Blueprint $table): void {
             $table->id();
+            $table->uuid('uuid')->unique();
             $table->foreignId('user_id')->constrained()->cascadeOnDelete();
             $table->string('source_excel_name');
             $table->string('template_name');
