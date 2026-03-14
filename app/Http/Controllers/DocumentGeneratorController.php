@@ -16,6 +16,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
@@ -81,6 +82,7 @@ class DocumentGeneratorController extends Controller
                 $itemPayload = [];
                 foreach ($rows as $index => $rowData) {
                     $itemPayload[] = [
+                        'uuid' => (string) Str::uuid(),
                         'document_batch_id' => $batch->id,
                         'row_number' => $index + 2,
                         'row_data' => json_encode($rowData, JSON_THROW_ON_ERROR),
@@ -105,6 +107,7 @@ class DocumentGeneratorController extends Controller
 
         return response()->json([
             'batch_id' => $batch->id,
+            'batch_uuid' => $batch->uuid,
             'status' => $batch->status,
             'total_items' => $batch->total_items,
         ], 201);
@@ -143,6 +146,7 @@ class DocumentGeneratorController extends Controller
             ->through(static function (DocumentBatchItem $item): array {
                 return [
                     'id' => $item->id,
+                    'uuid' => $item->uuid,
                     'row_number' => $item->row_number,
                     'company' => self::extractCompanyFromRowData($item->row_data ?? []),
                     'status' => $item->status,
@@ -193,7 +197,10 @@ class DocumentGeneratorController extends Controller
             ]);
         }
 
-        return Storage::disk('local')->download($path, "batch-{$batch->id}-row-{$item->row_number}.docx");
+        return response()->download(
+            Storage::disk('local')->path($path),
+            "batch-{$batch->id}-row-{$item->row_number}.docx"
+        );
     }
 
     public function showItem(DocumentBatch $batch, DocumentBatchItem $item): JsonResponse
@@ -343,6 +350,7 @@ class DocumentGeneratorController extends Controller
             ->through(static function (DocumentBatchItemActivityLog $log): array {
                 return [
                     'id' => $log->id,
+                    'uuid' => $log->uuid,
                     'action' => $log->action,
                     'summary' => $log->summary,
                     'details' => $log->details ?? [],
@@ -394,6 +402,7 @@ class DocumentGeneratorController extends Controller
     {
         return [
             'id' => $batch->id,
+            'uuid' => $batch->uuid,
             'source_excel_name' => $batch->source_excel_name,
             'template_name' => $batch->template_name,
             'status' => $batch->status,
@@ -432,6 +441,7 @@ class DocumentGeneratorController extends Controller
     {
         return [
             'id' => $item->id,
+            'uuid' => $item->uuid,
             'row_number' => $item->row_number,
             'company' => self::extractCompanyFromRowData($item->row_data ?? []),
             'status' => $item->status,
@@ -494,3 +504,6 @@ class DocumentGeneratorController extends Controller
         return preg_replace('/[^a-z0-9]+/', '', mb_strtolower($key)) ?? '';
     }
 }
+
+
+

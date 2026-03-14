@@ -55,6 +55,7 @@ type SortDirection = 'asc' | 'desc';
 
 type BatchSummary = {
     id: number;
+    uuid: string;
     source_excel_name: string;
     template_name: string;
     status: string;
@@ -78,6 +79,7 @@ type BatchProgress = {
 
 type BatchItem = {
     id: number;
+    uuid: string;
     row_number: number;
     company: string;
     status: string;
@@ -223,7 +225,7 @@ const sendJson = async <T,>(
 const loadBatchProgress = async () => {
     batchProgress.value = await getApi<BatchProgress>(
         documentGeneratorRoutes.batches.progress.url({
-            batch: props.batch.id,
+            batch: props.batch.uuid,
         }),
     );
 };
@@ -248,7 +250,7 @@ const loadBatchItems = async (page = itemsData.value.current_page) => {
 
         itemsData.value = await getApi<PaginatedResponse<BatchItem>>(
             documentGeneratorRoutes.batches.items.url(
-                { batch: props.batch.id },
+                { batch: props.batch.uuid },
                 {
                     query,
                 },
@@ -469,8 +471,8 @@ const saveEditedItem = async () => {
     try {
         await sendJson<BatchItem>(
             documentGeneratorRoutes.batches.items.update.url({
-                batch: props.batch.id,
-                item: editingItem.value.id,
+                batch: props.batch.uuid,
+                item: editingItem.value.uuid,
             }),
             'PUT',
             {
@@ -520,8 +522,8 @@ const saveEditedItem = async () => {
 
 const pdfUrlForItem = (item: BatchItem) =>
     documentGeneratorRoutes.batches.items.download.url({
-        batch: props.batch.id,
-        item: item.id,
+        batch: props.batch.uuid,
+        item: item.uuid,
         type: 'pdf',
     });
 
@@ -575,8 +577,8 @@ const printItemPdf = (item: BatchItem) => {
 
 const docxUrlForItem = (item: BatchItem) =>
     documentGeneratorRoutes.batches.items.download.url({
-        batch: props.batch.id,
-        item: item.id,
+        batch: props.batch.uuid,
+        item: item.uuid,
         type: 'docx',
     });
 

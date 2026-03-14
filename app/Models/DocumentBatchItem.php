@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Str;
 
 class DocumentBatchItem extends Model
 {
@@ -16,6 +17,7 @@ class DocumentBatchItem extends Model
      * @var list<string>
      */
     protected $fillable = [
+        'uuid',
         'document_batch_id',
         'row_number',
         'row_data',
@@ -26,6 +28,15 @@ class DocumentBatchItem extends Model
         'started_at',
         'completed_at',
     ];
+
+    protected static function booted(): void
+    {
+        static::creating(static function (self $item): void {
+            if (! is_string($item->uuid) || $item->uuid === '') {
+                $item->uuid = (string) Str::uuid();
+            }
+        });
+    }
 
     /**
      * @return array<string, string>

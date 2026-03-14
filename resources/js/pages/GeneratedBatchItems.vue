@@ -7,6 +7,7 @@ import type { BreadcrumbItem } from '@/types';
 
 type BatchSummary = {
     id: number;
+    uuid: string;
     source_excel_name: string;
     template_name: string;
     status: string;
@@ -29,7 +30,7 @@ const breadcrumbs: BreadcrumbItem[] = [
     },
     {
         title: `Batch #${props.batch.id}`,
-        href: `/generated-files/${props.batch.id}`,
+        href: `/generated-files/${props.batch.uuid}`,
     },
 ];
 </script>

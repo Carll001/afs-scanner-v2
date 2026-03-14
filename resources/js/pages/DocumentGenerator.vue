@@ -36,6 +36,7 @@ type BatchProgress = {
 
 type BatchItem = {
     id: number;
+    uuid: string;
     row_number: number;
     company: string;
     status: string;
@@ -49,6 +50,7 @@ type BatchItem = {
 
 type HistoryBatch = {
     id: number;
+    uuid: string;
     source_excel_name: string;
     template_name: string;
     status: string;
@@ -62,6 +64,7 @@ type HistoryBatch = {
 
 type ActivityLog = {
     id: number;
+    uuid: string;
     action: string;
     summary: string;
     details: Record<string, unknown>;
@@ -100,6 +103,7 @@ const createErrorMessage = ref<string | null>(null);
 const creatingBatch = ref(false);
 
 const activeBatchId = ref<number | null>(null);
+const activeBatchUuid = ref<string | null>(null);
 const progress = ref<BatchProgress | null>(null);
 const pollingActive = ref(false);
 
@@ -257,8 +261,9 @@ const postBatch = async () => {
             throw new Error(`Failed to create batch (${response.status}).`);
         }
 
-        const payload = (await response.json()) as { batch_id: number };
+        const payload = (await response.json()) as { batch_id: number; batch_uuid: string };
         activeBatchId.value = payload.batch_id;
+        activeBatchUuid.value = payload.batch_uuid;
 
         await Promise.all([loadProgress(), loadBatchItems(1), loadActivityLogs(1), loadHistory(1)]);
         startPolling();
@@ -298,17 +303,17 @@ const onCompanySearchInput = (event: Event) => {
 };
 
 const loadProgress = async () => {
-    if (!activeBatchId.value) {
+    if (!activeBatchUuid.value) {
         return;
     }
 
     progress.value = await getApi<BatchProgress>(
-        documentGeneratorRoutes.batches.progress.url({ batch: activeBatchId.value }),
+        documentGeneratorRoutes.batches.progress.url({ batch: activeBatchUuid.value }),
     );
 };
 
 const loadBatchItems = async (page = itemsData.value.current_page) => {
-    if (!activeBatchId.value) {
+    if (!activeBatchUuid.value) {
         return;
     }
 
@@ -330,7 +335,7 @@ const loadBatchItems = async (page = itemsData.value.current_page) => {
 
         itemsData.value = await getApi<PaginatedResponse<BatchItem>>(
             documentGeneratorRoutes.batches.items.url(
-                { batch: activeBatchId.value },
+                { batch: activeBatchUuid.value },
                 {
                     query,
                 },
@@ -360,7 +365,7 @@ const loadHistory = async (page = historyData.value.current_page) => {
 };
 
 const loadActivityLogs = async (page = activityData.value.current_page) => {
-    if (!activeBatchId.value) {
+    if (!activeBatchUuid.value) {
         return;
     }
 
@@ -368,7 +373,7 @@ const loadActivityLogs = async (page = activityData.value.current_page) => {
     try {
         activityData.value = await getApi<PaginatedResponse<ActivityLog>>(
             documentGeneratorRoutes.batches.logs.url(
-                { batch: activeBatchId.value },
+                { batch: activeBatchUuid.value },
                 {
                     query: {
                         page,
@@ -449,7 +454,7 @@ const closeEditDialog = () => {
 };
 
 const saveEditedItem = async () => {
-    if (!activeBatchId.value || !editingItem.value) {
+    if (!activeBatchUuid.value || !editingItem.value) {
         return;
     }
 
@@ -460,8 +465,8 @@ const saveEditedItem = async () => {
     try {
         await sendJson<BatchItem>(
             documentGeneratorRoutes.batches.items.update.url({
-                batch: activeBatchId.value,
-                item: editingItem.value.id,
+                batch: activeBatchUuid.value,
+                item: editingItem.value.uuid,
             }),
             'PUT',
             {
@@ -538,8 +543,8 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
                         'a',
                         {
                             href: documentGeneratorRoutes.batches.items.download.url({
-                                batch: activeBatchId.value ?? 0,
-                                item: row.original.id,
+                                batch: activeBatchUuid.value ?? '',
+                                item: row.original.uuid,
                                 type: 'docx',
                             }),
                             class: 'text-primary text-sm underline',
@@ -553,8 +558,8 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
                           'a',
                           {
                               href: documentGeneratorRoutes.batches.items.download.url({
-                                  batch: activeBatchId.value ?? 0,
-                                  item: row.original.id,
+                                  batch: activeBatchUuid.value ?? '',
+                                  item: row.original.uuid,
                                   type: 'pdf',
                               }),
                               class: 'text-primary text-sm underline',
@@ -653,6 +658,7 @@ const historyColumns = computed<ColumnDef<HistoryBatch>[]>(() => [
                     size: 'sm',
                     onClick: async () => {
                         activeBatchId.value = row.original.id;
+                        activeBatchUuid.value = row.original.uuid;
                         await Promise.all([loadProgress(), loadBatchItems(1), loadActivityLogs(1)]);
                         if (progress.value && !['completed', 'failed'].includes(progress.value.status)) {
                             startPolling();
