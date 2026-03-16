@@ -13,6 +13,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
+use Inertia\Testing\AssertableInertia as Assert;
 use Mockery;
 use Tests\TestCase;
 
@@ -73,6 +74,39 @@ class DocumentGeneratorTest extends TestCase
 
         $this->assertDatabaseCount('document_batch_items', 2);
         Queue::assertPushed(GenerateDocumentBatchItemJob::class, 2);
+    }
+
+    public function test_document_generator_preloads_owned_batch_selection_from_query_params(): void
+    {
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+
+        $ownedBatch = DocumentBatch::factory()->for($user)->create();
+        $foreignBatch = DocumentBatch::factory()->for($otherUser)->create();
+
+        $this->actingAs($user)
+            ->get(route('document-generator.index', [
+                'batch' => $ownedBatch->id,
+                'status' => 'failed',
+            ]))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page) => $page
+                ->component('DocumentGenerator')
+                ->where('initialSelection.batch_id', $ownedBatch->id)
+                ->where('initialSelection.status', 'failed'),
+            );
+
+        $this->actingAs($user)
+            ->get(route('document-generator.index', [
+                'batch' => $foreignBatch->id,
+                'status' => 'failed',
+            ]))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page) => $page
+                ->component('DocumentGenerator')
+                ->where('initialSelection.batch_id', null)
+                ->where('initialSelection.status', null),
+            );
     }
 
     public function test_any_authenticated_user_can_view_batch_progress_items_logs_and_downloads(): void
