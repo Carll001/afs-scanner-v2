@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import type { ColumnDef } from '@tanstack/vue-table';
 import { Head } from '@inertiajs/vue3';
-import { computed, h, onBeforeUnmount, reactive, ref } from 'vue';
+import type { ColumnDef } from '@tanstack/vue-table';
+import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -83,6 +83,10 @@ type PaginatedResponse<T> = {
 
 const props = defineProps<{
     initialHistory: PaginatedResponse<HistoryBatch>;
+    initialSelection: {
+        batch_id: number | null;
+        status: string | null;
+    };
 }>();
 
 const breadcrumbs: BreadcrumbItem[] = [
@@ -139,6 +143,22 @@ const editForm = reactive<Record<string, string>>({});
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let companySearchDebounce: ReturnType<typeof setTimeout> | null = null;
+
+const buildRelativeUrl = (path: string, query: Record<string, string | number | undefined> = {}) => {
+    const params = new URLSearchParams();
+
+    Object.entries(query).forEach(([key, value]) => {
+        if (value === undefined) {
+            return;
+        }
+
+        params.set(key, String(value));
+    });
+
+    const queryString = params.toString();
+
+    return queryString ? `${path}?${queryString}` : path;
+};
 
 const csrfToken = () => {
     const xsrfCookie = document.cookie
@@ -367,15 +387,10 @@ const loadActivityLogs = async (page = activityData.value.current_page) => {
     activityLoading.value = true;
     try {
         activityData.value = await getApi<PaginatedResponse<ActivityLog>>(
-            documentGeneratorRoutes.batches.logs.url(
-                { batch: activeBatchId.value },
-                {
-                    query: {
-                        page,
-                        per_page: activityData.value.per_page,
-                    },
-                },
-            ),
+            buildRelativeUrl(`/document-generator/batches/${activeBatchId.value}/logs`, {
+                page,
+                per_page: activityData.value.per_page,
+            }),
         );
     } finally {
         activityLoading.value = false;
@@ -459,10 +474,7 @@ const saveEditedItem = async () => {
 
     try {
         await sendJson<BatchItem>(
-            documentGeneratorRoutes.batches.items.update.url({
-                batch: activeBatchId.value,
-                item: editingItem.value.id,
-            }),
+            `/document-generator/batches/${activeBatchId.value}/items/${editingItem.value.id}`,
             'PUT',
             {
                 row_data: editForm,
@@ -672,6 +684,25 @@ onBeforeUnmount(() => {
         clearTimeout(companySearchDebounce);
     }
 });
+
+onMounted(async () => {
+    if (!props.initialSelection.batch_id) {
+        return;
+    }
+
+    activeBatchId.value = props.initialSelection.batch_id;
+    itemStatusFilter.value = props.initialSelection.status ?? 'all';
+
+    try {
+        await Promise.all([loadProgress(), loadBatchItems(1), loadActivityLogs(1)]);
+
+        if (progress.value && !['completed', 'failed'].includes(progress.value.status)) {
+            startPolling();
+        }
+    } catch {
+        stopPolling();
+    }
+});
 </script>
 
 <template>
@@ -680,7 +711,7 @@ onBeforeUnmount(() => {
 
     <AppLayout :breadcrumbs="breadcrumbs">
         <div class="space-y-6 p-4">
-            <Card>
+            <Card id="new-batch">
                 <CardHeader>
                     <CardTitle>Bulk Document Generator</CardTitle>
                     <CardDescription>

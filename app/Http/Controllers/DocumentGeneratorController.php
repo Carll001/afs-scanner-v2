@@ -10,9 +10,10 @@ use App\Models\DocumentBatchItemActivityLog;
 use App\Models\User;
 use App\Services\DocumentBatchActivityLogger;
 use App\Services\ExcelExtractionService;
+use App\Support\DocumentBatchItemData;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -25,8 +26,30 @@ class DocumentGeneratorController extends Controller
 {
     public function index(Request $request): Response
     {
+        $validated = $request->validate([
+            'batch' => ['nullable', 'integer'],
+            'status' => ['nullable', 'in:queued,processing,docx_done,pdf_done,failed'],
+        ]);
+
+        $initialBatchId = null;
+        if (isset($validated['batch'])) {
+            $candidateBatchId = (int) $validated['batch'];
+            $initialBatchId = $request->user()
+                ->documentBatches()
+                ->whereKey($candidateBatchId)
+                ->exists()
+                ? $candidateBatchId
+                : null;
+        }
+
         return Inertia::render('DocumentGenerator', [
             'initialHistory' => $this->historyPayload($request, null),
+            'initialSelection' => [
+                'batch_id' => $initialBatchId,
+                'status' => $initialBatchId !== null
+                    ? (isset($validated['status']) ? (string) $validated['status'] : null)
+                    : null,
+            ],
         ]);
     }
 
@@ -130,7 +153,7 @@ class DocumentGeneratorController extends Controller
                 return [
                     'id' => $item->id,
                     'row_number' => $item->row_number,
-                    'company' => self::extractCompanyFromRowData($item->row_data ?? []),
+                    'company' => DocumentBatchItemData::extractCompany($item->row_data ?? []),
                     'status' => $item->status,
                     'row_data' => $item->row_data ?? [],
                     'docx_available' => ! empty($item->docx_path),
@@ -413,7 +436,7 @@ class DocumentGeneratorController extends Controller
         return [
             'id' => $item->id,
             'row_number' => $item->row_number,
-            'company' => self::extractCompanyFromRowData($item->row_data ?? []),
+            'company' => DocumentBatchItemData::extractCompany($item->row_data ?? []),
             'status' => $item->status,
             'row_data' => $item->row_data ?? [],
             'docx_available' => ! empty($item->docx_path),
@@ -431,12 +454,12 @@ class DocumentGeneratorController extends Controller
 
         if ($driver === 'pgsql') {
             $query->whereRaw(
-                "exists (
+                'exists (
                     select 1
                     from jsonb_each_text(row_data::jsonb) as company_entry(key, value)
                     where lower(company_entry.key) like ?
                     and lower(company_entry.value) like ?
-                )",
+                )',
                 ['%company%', $search]
             );
 
@@ -444,33 +467,5 @@ class DocumentGeneratorController extends Controller
         }
 
         $query->whereRaw('LOWER(CAST(row_data AS CHAR)) LIKE ?', [$search]);
-    }
-
-    /**
-     * @param  array<string, mixed>  $rowData
-     */
-    private static function extractCompanyFromRowData(array $rowData): string
-    {
-        $fallback = '';
-
-        foreach ($rowData as $key => $value) {
-            $normalizedKey = self::normalizeCompanyKey((string) $key);
-            $stringValue = is_scalar($value) ? trim((string) $value) : '';
-
-            if ($normalizedKey === 'company') {
-                return $stringValue;
-            }
-
-            if ($fallback === '' && str_contains($normalizedKey, 'company')) {
-                $fallback = $stringValue;
-            }
-        }
-
-        return $fallback;
-    }
-
-    private static function normalizeCompanyKey(string $key): string
-    {
-        return preg_replace('/[^a-z0-9]+/', '', mb_strtolower($key)) ?? '';
     }
 }
