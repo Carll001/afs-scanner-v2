@@ -93,7 +93,7 @@ const breadcrumbs: BreadcrumbItem[] = [
 ];
 
 const excelFile = ref<File | null>(null);
-const templateFile = ref<File | null>(null);
+const defaultTemplateFile = ref<File | null>(null);
 const sheetIndex = ref('0');
 const createErrors = ref<Record<string, string[]>>({});
 const createErrorMessage = ref<string | null>(null);
@@ -216,8 +216,42 @@ const sendJson = async <T>(url: string, method: 'PUT', payload: unknown): Promis
 };
 
 const postBatch = async () => {
-    if (!excelFile.value || !templateFile.value) {
-        createErrorMessage.value = 'Excel file and DOCX template are required.';
+    if (!excelFile.value) {
+        createErrorMessage.value = 'Excel file is required.';
+        return;
+    }
+
+    if (companySearchDebounce) {
+        clearTimeout(companySearchDebounce);
+        companySearchDebounce = null;
+    }
+
+    if (companySearch.value.trim() !== '') {
+        companySearch.value = '';
+    }
+
+    if (activeBatchId.value !== null) {
+        activeBatchId.value = null;
+        itemsData.value = {
+            current_page: 1,
+            data: [],
+            last_page: 1,
+            per_page: itemsData.value.per_page,
+            total: 0,
+        };
+        activityData.value = {
+            current_page: 1,
+            data: [],
+            last_page: 1,
+            per_page: activityData.value.per_page,
+            total: 0,
+        };
+        progress.value = null;
+        stopPolling();
+    }
+
+    if (!excelFile.value) {
+        createErrorMessage.value = 'Excel file is required.';
         return;
     }
 
@@ -228,7 +262,9 @@ const postBatch = async () => {
     try {
         const formData = new FormData();
         formData.append('excel_file', excelFile.value);
-        formData.append('template_file', templateFile.value);
+        if (defaultTemplateFile.value) {
+            formData.append('default_template_file', defaultTemplateFile.value);
+        }
         formData.append('sheet_index', sheetIndex.value || '0');
 
         const response = await fetch(documentGeneratorRoutes.batches.store.url(), {
@@ -276,7 +312,7 @@ const onExcelFileChange = (event: Event) => {
 
 const onTemplateFileChange = (event: Event) => {
     const input = event.target as HTMLInputElement;
-    templateFile.value = input.files?.[0] ?? null;
+    defaultTemplateFile.value = input.files?.[0] ?? null;
 };
 
 const onItemStatusChange = async (value: string) => {
@@ -682,38 +718,52 @@ onBeforeUnmount(() => {
         <div class="space-y-6 p-4">
             <Card>
                 <CardHeader>
-                    <CardTitle>Bulk Document Generator</CardTitle>
-                    <CardDescription>
-                        Upload one Excel source and one DOCX template. Every non-header row will generate one DOCX and
-                        one PDF.
-                    </CardDescription>
+                    <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                            <CardTitle>Bulk Document Generator</CardTitle>
+                            <CardDescription>
+                                Upload one Excel source, one default DOCX template, and optional year-threshold templates.
+                                Each row uses the year from `SEC REGISTRATION DATE` to choose the matching template.
+                            </CardDescription>
+                        </div>
+
+                        <Button variant="outline" as-child>
+                            <a href="/document-generator/template-mapping">Template Mapping</a>
+                        </Button>
+                    </div>
                 </CardHeader>
                 <CardContent>
-                    <form class="grid gap-4 md:grid-cols-3" @submit.prevent="postBatch">
-                        <div class="grid gap-2">
-                            <Label for="excel">Excel File</Label>
-                            <Input id="excel" type="file" accept=".xls,.xlsx" @change="onExcelFileChange" />
-                            <p v-if="createErrors.excel_file" class="text-sm text-destructive">
-                                {{ createErrors.excel_file[0] }}
-                            </p>
+                    <form class="space-y-4" @submit.prevent="postBatch">
+                        <div class="grid gap-4 md:grid-cols-3">
+                            <div class="grid gap-2">
+                                <Label for="excel">Excel File</Label>
+                                <Input id="excel" type="file" accept=".xls,.xlsx" @change="onExcelFileChange" />
+                                <p v-if="createErrors.excel_file" class="text-sm text-destructive">
+                                    {{ createErrors.excel_file[0] }}
+                                </p>
+                            </div>
+
+                            <div class="grid gap-2">
+                                <Label for="template">Default DOCX Template</Label>
+                                <Input id="template" type="file" accept=".docx" @change="onTemplateFileChange" />
+                                <p v-if="createErrors.default_template_file" class="text-sm text-destructive">
+                                    {{ createErrors.default_template_file[0] }}
+                                </p>
+                                <p class="text-xs text-muted-foreground">
+                                    Optional if a global default is already set in Template Mapping.
+                                </p>
+                            </div>
+
+                            <div class="grid gap-2">
+                                <Label for="sheet-index">Sheet Index</Label>
+                                <Input id="sheet-index" v-model="sheetIndex" type="number" min="0" />
+                            </div>
                         </div>
 
-                        <div class="grid gap-2">
-                            <Label for="template">DOCX Template</Label>
-                            <Input id="template" type="file" accept=".docx" @change="onTemplateFileChange" />
-                            <p v-if="createErrors.template_file" class="text-sm text-destructive">
-                                {{ createErrors.template_file[0] }}
-                            </p>
-                        </div>
-
-                        <div class="grid gap-2">
-                            <Label for="sheet-index">Sheet Index</Label>
-                            <Input id="sheet-index" v-model="sheetIndex" type="number" min="0" />
-                            <Button type="submit" :disabled="creatingBatch">
-                                <Spinner v-if="creatingBatch" class="size-4" />
-                                Start Batch
-                            </Button>
-                        </div>
+                        <Button type="submit" :disabled="creatingBatch">
+                            <Spinner v-if="creatingBatch" class="size-4" />
+                            Start Batch
+                        </Button>
                     </form>
                     <p v-if="createErrorMessage" class="mt-3 text-sm text-destructive">
                         {{ createErrorMessage }}

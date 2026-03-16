@@ -7,6 +7,8 @@ use App\Jobs\GenerateDocumentBatchItemJob;
 use App\Models\DocumentBatch;
 use App\Models\DocumentBatchItem;
 use App\Models\DocumentBatchItemActivityLog;
+use App\Models\DocumentBatchTemplate;
+use App\Models\DocumentGeneratorTemplate;
 use App\Models\User;
 use App\Services\DocumentBatchActivityLogger;
 use App\Services\ExcelExtractionService;
@@ -16,6 +18,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
@@ -37,6 +40,22 @@ class DocumentGeneratorController extends Controller
         ]);
     }
 
+    public function templateMapping(): Response
+    {
+        return Inertia::render('TemplateMapping', [
+            'mapping' => $this->globalTemplateMappingPayload(),
+        ]);
+    }
+
+    public function generatedFilesTemplateMapping(Request $request, DocumentBatch $batch): Response
+    {
+        $this->assertBatchOwnership($request, $batch);
+
+        return Inertia::render('BatchTemplateMapping', [
+            'batch' => $this->templateMappingBatchPayload($batch),
+        ]);
+    }
+
     public function generatedFilesBatch(Request $request, DocumentBatch $batch): Response
     {
         return Inertia::render('GeneratedBatchItems', [
@@ -51,31 +70,64 @@ class DocumentGeneratorController extends Controller
         $sheetIndex = (int) $request->integer('sheet_index', 0);
 
         $excelFile = $request->file('excel_file');
-        $templateFile = $request->file('template_file');
-        if (! $excelFile || ! $templateFile) {
+        $defaultTemplateFile = $request->file('default_template_file');
+        if (! $excelFile) {
             return response()->json(['message' => 'Files are required.'], 422);
         }
 
         $excelPath = $excelFile->store("document-generator/{$request->user()->id}/uploads", 'local');
-        $templatePath = $templateFile->store("document-generator/{$request->user()->id}/uploads", 'local');
+        $resolvedTemplates = $this->resolveTemplatesForBatch($request, $defaultTemplateFile);
+        $defaultTemplate = $resolvedTemplates['default'];
+        $yearTemplatePayload = $resolvedTemplates['year_templates'];
 
         $extracted = $excelExtractionService->extract(Storage::disk('local')->path($excelPath), $sheetIndex);
         $headers = $extracted['headers'];
         $rows = $extracted['rows'];
 
-        $batch = DB::transaction(function () use ($request, $headers, $rows, $sheetIndex, $excelFile, $templateFile, $excelPath, $templatePath): DocumentBatch {
+        $batch = DB::transaction(function () use (
+            $request,
+            $headers,
+            $rows,
+            $sheetIndex,
+            $excelFile,
+            $excelPath,
+            $defaultTemplate,
+            $yearTemplatePayload
+        ): DocumentBatch {
             $batch = DocumentBatch::query()->create([
                 'user_id' => $request->user()->id,
                 'source_excel_name' => $excelFile->getClientOriginalName(),
-                'template_name' => $templateFile->getClientOriginalName(),
+                'template_name' => $defaultTemplate['template_name'],
                 'excel_path' => $excelPath,
-                'template_path' => $templatePath,
+                'template_path' => $defaultTemplate['template_path'],
                 'sheet_index' => $sheetIndex,
                 'headers_json' => $headers,
                 'total_items' => count($rows),
                 'status' => count($rows) > 0 ? 'queued' : 'completed',
                 'completed_at' => count($rows) > 0 ? null : now(),
             ]);
+
+            $templatePayload = [[
+                'document_batch_id' => $batch->id,
+                'year' => null,
+                'template_name' => $defaultTemplate['template_name'],
+                'template_path' => $defaultTemplate['template_path'],
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]];
+
+            foreach ($yearTemplatePayload as $template) {
+                $templatePayload[] = [
+                    'document_batch_id' => $batch->id,
+                    'year' => $template['year'],
+                    'template_name' => $template['template_name'],
+                    'template_path' => $template['template_path'],
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ];
+            }
+
+            DocumentBatchTemplate::query()->insert($templatePayload);
 
             if ($rows !== []) {
                 $itemPayload = [];
@@ -358,6 +410,220 @@ class DocumentGeneratorController extends Controller
         return response()->json($logs);
     }
 
+    public function updateGlobalDefaultTemplate(Request $request): JsonResponse
+    {
+        $request->validate([
+            'template_file' => ['required', 'file', 'mimes:docx'],
+        ]);
+
+        $file = $request->file('template_file');
+        if (! $file) {
+            return response()->json(['message' => 'Template file is required.'], 422);
+        }
+
+        $defaultTemplate = DocumentGeneratorTemplate::query()->whereNull('year')->first();
+        $oldPath = $defaultTemplate?->template_path;
+        $templatePath = $file->store('document-generator/global-templates', 'local');
+        $templateName = $file->getClientOriginalName();
+
+        if ($defaultTemplate) {
+            $defaultTemplate->forceFill([
+                'template_name' => $templateName,
+                'template_path' => $templatePath,
+            ])->save();
+        } else {
+            DocumentGeneratorTemplate::query()->create([
+                'year' => null,
+                'template_name' => $templateName,
+                'template_path' => $templatePath,
+            ]);
+        }
+
+        $this->deleteTemplateFiles($oldPath ? [$oldPath] : []);
+
+        return response()->json($this->globalTemplateMappingPayload());
+    }
+
+    public function storeGlobalTemplate(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'year' => ['required', 'integer', 'digits:4'],
+            'template_file' => ['required', 'file', 'mimes:docx'],
+        ]);
+
+        $year = (int) $validated['year'];
+        $this->ensureUniqueGlobalTemplateYear($year);
+
+        $file = $request->file('template_file');
+        if (! $file) {
+            return response()->json(['message' => 'Template file is required.'], 422);
+        }
+
+        DocumentGeneratorTemplate::query()->create([
+            'year' => $year,
+            'template_name' => $file->getClientOriginalName(),
+            'template_path' => $file->store('document-generator/global-templates', 'local'),
+        ]);
+
+        return response()->json($this->globalTemplateMappingPayload(), 201);
+    }
+
+    public function updateGlobalTemplate(Request $request, DocumentGeneratorTemplate $template): JsonResponse
+    {
+        abort_if($template->year === null, 404);
+
+        $validated = $request->validate([
+            'year' => ['required', 'integer', 'digits:4'],
+            'template_file' => ['nullable', 'file', 'mimes:docx'],
+        ]);
+
+        $year = (int) $validated['year'];
+        $this->ensureUniqueGlobalTemplateYear($year, $template->id);
+
+        $oldPath = null;
+        $file = $request->file('template_file');
+        $updates = ['year' => $year];
+
+        if ($file) {
+            $oldPath = $template->template_path;
+            $updates['template_name'] = $file->getClientOriginalName();
+            $updates['template_path'] = $file->store('document-generator/global-templates', 'local');
+        }
+
+        $template->forceFill($updates)->save();
+
+        $this->deleteTemplateFiles($oldPath ? [$oldPath] : []);
+
+        return response()->json($this->globalTemplateMappingPayload());
+    }
+
+    public function destroyGlobalTemplate(DocumentGeneratorTemplate $template): JsonResponse
+    {
+        abort_if($template->year === null, 404);
+
+        $oldPath = $template->template_path;
+        $template->delete();
+        $this->deleteTemplateFiles([$oldPath]);
+
+        return response()->json($this->globalTemplateMappingPayload());
+    }
+
+    public function updateDefaultTemplate(Request $request, DocumentBatch $batch): JsonResponse
+    {
+        $this->assertBatchOwnership($request, $batch);
+
+        $request->validate([
+            'template_file' => ['required', 'file', 'mimes:docx'],
+        ]);
+
+        $file = $request->file('template_file');
+        if (! $file) {
+            return response()->json(['message' => 'Template file is required.'], 422);
+        }
+
+        /** @var DocumentBatchTemplate $defaultTemplate */
+        $defaultTemplate = $batch->templates()->whereNull('year')->firstOrFail();
+        $oldPaths = array_values(array_filter([$batch->template_path, $defaultTemplate->template_path]));
+
+        DB::transaction(function () use ($request, $batch, $defaultTemplate, $file): void {
+            $templatePath = $file->store("document-generator/{$request->user()->id}/uploads", 'local');
+            $templateName = $file->getClientOriginalName();
+
+            $batch->forceFill([
+                'template_name' => $templateName,
+                'template_path' => $templatePath,
+            ])->save();
+
+            $defaultTemplate->forceFill([
+                'template_name' => $templateName,
+                'template_path' => $templatePath,
+            ])->save();
+        });
+
+        $this->deleteTemplateFiles($oldPaths);
+
+        return response()->json($this->templateMappingBatchPayload($batch->fresh('templates')));
+    }
+
+    public function storeTemplate(Request $request, DocumentBatch $batch): JsonResponse
+    {
+        $this->assertBatchOwnership($request, $batch);
+
+        $validated = $request->validate([
+            'year' => ['required', 'integer', 'digits:4'],
+            'template_file' => ['required', 'file', 'mimes:docx'],
+        ]);
+
+        $year = (int) $validated['year'];
+        $this->ensureUniqueTemplateYear($batch, $year);
+
+        $file = $request->file('template_file');
+        if (! $file) {
+            return response()->json(['message' => 'Template file is required.'], 422);
+        }
+
+        DocumentBatchTemplate::query()->create([
+            'document_batch_id' => $batch->id,
+            'year' => $year,
+            'template_name' => $file->getClientOriginalName(),
+            'template_path' => $file->store("document-generator/{$request->user()->id}/uploads", 'local'),
+        ]);
+
+        return response()->json($this->templateMappingBatchPayload($batch->fresh('templates')), 201);
+    }
+
+    public function updateTemplate(Request $request, DocumentBatch $batch, DocumentBatchTemplate $template): JsonResponse
+    {
+        $this->assertBatchOwnership($request, $batch);
+        $this->assertTemplateBelongsToBatch($batch, $template);
+
+        abort_if($template->year === null, 404);
+
+        $validated = $request->validate([
+            'year' => ['required', 'integer', 'digits:4'],
+            'template_file' => ['nullable', 'file', 'mimes:docx'],
+        ]);
+
+        $year = (int) $validated['year'];
+        $this->ensureUniqueTemplateYear($batch, $year, $template->id);
+
+        $oldPath = null;
+        $file = $request->file('template_file');
+
+        DB::transaction(function () use ($request, $template, $year, $file, &$oldPath): void {
+            $updates = [
+                'year' => $year,
+            ];
+
+            if ($file) {
+                $oldPath = $template->template_path;
+                $updates['template_name'] = $file->getClientOriginalName();
+                $updates['template_path'] = $file->store("document-generator/{$request->user()->id}/uploads", 'local');
+            }
+
+            $template->forceFill($updates)->save();
+        });
+
+        $this->deleteTemplateFiles($oldPath ? [$oldPath] : []);
+
+        return response()->json($this->templateMappingBatchPayload($batch->fresh('templates')));
+    }
+
+    public function destroyTemplate(Request $request, DocumentBatch $batch, DocumentBatchTemplate $template): JsonResponse
+    {
+        $this->assertBatchOwnership($request, $batch);
+        $this->assertTemplateBelongsToBatch($batch, $template);
+
+        abort_if($template->year === null, 404);
+
+        $oldPath = $template->template_path;
+        $template->delete();
+
+        $this->deleteTemplateFiles([$oldPath]);
+
+        return response()->json($this->templateMappingBatchPayload($batch->fresh('templates')));
+    }
+
     private function assertBatchOwnership(Request $request, DocumentBatch $batch): void
     {
         abort_unless($batch->user_id === $request->user()->id, 404);
@@ -366,6 +632,11 @@ class DocumentGeneratorController extends Controller
     private function assertItemBelongsToBatch(DocumentBatch $batch, DocumentBatchItem $item): void
     {
         abort_unless($item->document_batch_id === $batch->id, 404);
+    }
+
+    private function assertTemplateBelongsToBatch(DocumentBatch $batch, DocumentBatchTemplate $template): void
+    {
+        abort_unless($template->document_batch_id === $batch->id, 404);
     }
 
     /**
@@ -403,6 +674,51 @@ class DocumentGeneratorController extends Controller
             'failed_items' => $batch->failed_items,
             'created_at' => $batch->created_at?->toISOString(),
             'completed_at' => $batch->completed_at?->toISOString(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function templateMappingBatchPayload(DocumentBatch $batch): array
+    {
+        $batch->loadMissing('templates');
+
+        /** @var DocumentBatchTemplate|null $defaultTemplate */
+        $defaultTemplate = $batch->templates->first(static fn (DocumentBatchTemplate $template): bool => $template->year === null);
+
+        return [
+            ...$this->historyBatchPayload($batch),
+            'default_template' => $defaultTemplate ? $this->templatePayload($defaultTemplate) : null,
+            'year_templates' => $batch->templates
+                ->filter(static fn (DocumentBatchTemplate $template): bool => $template->year !== null)
+                ->sortBy('year')
+                ->values()
+                ->map(fn (DocumentBatchTemplate $template): array => $this->templatePayload($template))
+                ->all(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function globalTemplateMappingPayload(): array
+    {
+        $templates = DocumentGeneratorTemplate::query()
+            ->orderByRaw('case when year is null then 0 else 1 end')
+            ->orderBy('year')
+            ->get();
+
+        /** @var DocumentGeneratorTemplate|null $defaultTemplate */
+        $defaultTemplate = $templates->first(static fn (DocumentGeneratorTemplate $template): bool => $template->year === null);
+
+        return [
+            'default_template' => $defaultTemplate ? $this->globalTemplatePayload($defaultTemplate) : null,
+            'year_templates' => $templates
+                ->filter(static fn (DocumentGeneratorTemplate $template): bool => $template->year !== null)
+                ->values()
+                ->map(fn (DocumentGeneratorTemplate $template): array => $this->globalTemplatePayload($template))
+                ->all(),
         ];
     }
 
@@ -492,5 +808,190 @@ class DocumentGeneratorController extends Controller
     private static function normalizeCompanyKey(string $key): string
     {
         return preg_replace('/[^a-z0-9]+/', '', mb_strtolower($key)) ?? '';
+    }
+
+    /**
+     * @return list<array{year: int, template_name: string, template_path: string}>
+     */
+    private function storeYearTemplates(DocumentBatchStoreRequest $request): array
+    {
+        $templates = [];
+        $inputTemplates = $request->input('year_templates', []);
+
+        if (! is_array($inputTemplates)) {
+            return $templates;
+        }
+
+        foreach ($inputTemplates as $index => $template) {
+            if (! is_array($template)) {
+                continue;
+            }
+
+            $file = $request->file("year_templates.{$index}.template_file");
+            $year = $template['year'] ?? null;
+            if (! $file || ! is_numeric((string) $year)) {
+                continue;
+            }
+
+            $templates[] = [
+                'year' => (int) $year,
+                'template_name' => $file->getClientOriginalName(),
+                'template_path' => $file->store("document-generator/{$request->user()->id}/uploads", 'local'),
+            ];
+        }
+
+        return $templates;
+    }
+
+    /**
+     * @param  array{template_name: string, template_path: string}|null  $uploadedDefaultTemplate
+     * @return array{
+     *   default: array{template_name: string, template_path: string},
+     *   year_templates: list<array{year: int, template_name: string, template_path: string}>
+     * }
+     */
+    private function resolveTemplatesForBatch(DocumentBatchStoreRequest $request, $uploadedDefaultTemplateFile): array
+    {
+        $uploadedYearTemplates = $this->storeYearTemplates($request);
+        $defaultTemplate = null;
+
+        if ($uploadedDefaultTemplateFile) {
+            $defaultTemplate = [
+                'template_name' => $uploadedDefaultTemplateFile->getClientOriginalName(),
+                'template_path' => $uploadedDefaultTemplateFile->store("document-generator/{$request->user()->id}/uploads", 'local'),
+            ];
+        }
+
+        if ($defaultTemplate !== null) {
+            return [
+                'default' => $defaultTemplate,
+                'year_templates' => $uploadedYearTemplates,
+            ];
+        }
+
+        return $this->cloneGlobalTemplatesForBatch($request->user()->id);
+    }
+
+    /**
+     * @return array{
+     *   default: array{template_name: string, template_path: string},
+     *   year_templates: list<array{year: int, template_name: string, template_path: string}>
+     * }
+     */
+    private function cloneGlobalTemplatesForBatch(int $userId): array
+    {
+        $templates = DocumentGeneratorTemplate::query()->orderBy('year')->get();
+
+        /** @var DocumentGeneratorTemplate|null $defaultTemplate */
+        $defaultTemplate = $templates->first(static fn (DocumentGeneratorTemplate $template): bool => $template->year === null);
+
+        if (! $defaultTemplate) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'default_template_file' => ['A default DOCX template is required when no global default template is configured.'],
+            ]);
+        }
+
+        $clonedDefault = [
+            'template_name' => $defaultTemplate->template_name,
+            'template_path' => $this->copyTemplateToUserUploads($defaultTemplate->template_path, $userId, $defaultTemplate->template_name),
+        ];
+
+        $yearTemplates = $templates
+            ->filter(static fn (DocumentGeneratorTemplate $template): bool => $template->year !== null)
+            ->values()
+            ->map(fn (DocumentGeneratorTemplate $template): array => [
+                'year' => (int) $template->year,
+                'template_name' => $template->template_name,
+                'template_path' => $this->copyTemplateToUserUploads($template->template_path, $userId, $template->template_name),
+            ])
+            ->all();
+
+        return [
+            'default' => $clonedDefault,
+            'year_templates' => $yearTemplates,
+        ];
+    }
+
+    private function copyTemplateToUserUploads(string $sourcePath, int $userId, string $templateName): string
+    {
+        $extension = pathinfo($templateName, PATHINFO_EXTENSION);
+        $filename = pathinfo($templateName, PATHINFO_FILENAME);
+        $targetPath = "document-generator/{$userId}/uploads/{$filename}-".Str::uuid().($extension !== '' ? ".{$extension}" : '');
+
+        Storage::disk('local')->copy($sourcePath, $targetPath);
+
+        return $targetPath;
+    }
+
+    /**
+     * @return array{id: int, year: int|null, template_name: string}
+     */
+    private function templatePayload(DocumentBatchTemplate $template): array
+    {
+        return [
+            'id' => $template->id,
+            'year' => $template->year,
+            'template_name' => $template->template_name,
+        ];
+    }
+
+    private function ensureUniqueTemplateYear(DocumentBatch $batch, int $year, ?int $ignoreTemplateId = null): void
+    {
+        $query = $batch->templates()->where('year', $year);
+
+        if ($ignoreTemplateId !== null) {
+            $query->whereKeyNot($ignoreTemplateId);
+        }
+
+        if ($query->exists()) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'year' => ['Year template entries must use unique years.'],
+            ]);
+        }
+    }
+
+    /**
+     * @return array{id: int, year: int|null, template_name: string}
+     */
+    private function globalTemplatePayload(DocumentGeneratorTemplate $template): array
+    {
+        return [
+            'id' => $template->id,
+            'year' => $template->year,
+            'template_name' => $template->template_name,
+        ];
+    }
+
+    private function ensureUniqueGlobalTemplateYear(int $year, ?int $ignoreTemplateId = null): void
+    {
+        $query = DocumentGeneratorTemplate::query()->where('year', $year);
+
+        if ($ignoreTemplateId !== null) {
+            $query->whereKeyNot($ignoreTemplateId);
+        }
+
+        if ($query->exists()) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'year' => ['Year template entries must use unique years.'],
+            ]);
+        }
+    }
+
+    /**
+     * @param  list<string|null>  $paths
+     */
+    private function deleteTemplateFiles(array $paths): void
+    {
+        $uniquePaths = array_unique(
+            array_values(
+                array_filter($paths, static fn (?string $path): bool => is_string($path) && $path !== '')
+            )
+        );
+
+        foreach ($uniquePaths as $path) {
+            if (Storage::disk('local')->exists($path)) {
+                Storage::disk('local')->delete($path);
+            }
+        }
     }
 }

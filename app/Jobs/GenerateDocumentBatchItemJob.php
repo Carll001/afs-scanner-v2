@@ -4,10 +4,12 @@ namespace App\Jobs;
 
 use App\Models\DocumentBatch;
 use App\Models\DocumentBatchItem;
+use App\Models\DocumentBatchTemplate;
 use App\Models\User;
 use App\Services\DocumentBatchActivityLogger;
 use App\Services\DocxTemplateService;
 use App\Services\PdfConversionService;
+use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\DB;
@@ -29,7 +31,7 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
         DocxTemplateService $docxTemplateService,
         PdfConversionService $pdfConversionService
     ): void {
-        $item = DocumentBatchItem::with('batch')->find($this->documentBatchItemId);
+        $item = DocumentBatchItem::with('batch.templates')->find($this->documentBatchItemId);
         if (! $item instanceof DocumentBatchItem) {
             return;
         }
@@ -52,11 +54,11 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
 
             Storage::disk('local')->makeDirectory($baseDir);
 
-            $templatePath = Storage::disk('local')->path($batch->template_path);
-            $docxPath = Storage::disk('local')->path($docxRelativePath);
-
             /** @var array<string, string> $rowData */
             $rowData = $item->row_data ?? [];
+            $templatePath = $this->resolveTemplatePath($batch, $rowData);
+            $docxPath = Storage::disk('local')->path($docxRelativePath);
+
             $validation = $docxTemplateService->validateRowData($templatePath, $rowData);
             if ($validation['missing_data'] !== []) {
                 $errorMessage = 'Missing data: '.implode(', ', $validation['missing_data']);
@@ -135,6 +137,181 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
         }
 
         return $expectedRelativePath;
+    }
+
+    /**
+     * @param array<string, string> $rowData
+     */
+    private function resolveTemplatePath(DocumentBatch $batch, array $rowData): string
+    {
+        $year = $this->extractRegistrationYear($rowData);
+        if ($year === null) {
+            throw new \RuntimeException(
+                'Invalid SEC REGISTRATION DATE. Expected a recognizable date such as 7/23/2024 00:00:00.'
+            );
+        }
+
+        $template = $this->resolveTemplate($batch, $year);
+        if (! $template instanceof DocumentBatchTemplate) {
+            throw new \RuntimeException("No template configured for year {$year}.");
+        }
+
+        if (! Storage::disk('local')->exists($template->template_path)) {
+            throw new \RuntimeException("Template file is missing for year {$year}.");
+        }
+
+        return Storage::disk('local')->path($template->template_path);
+    }
+
+    private function resolveTemplate(DocumentBatch $batch, int $rowYear): ?DocumentBatchTemplate
+    {
+        /** @var \Illuminate\Support\Collection<int, DocumentBatchTemplate> $templates */
+        $templates = $batch->templates->sortByDesc(static fn (DocumentBatchTemplate $template): int => $template->year ?? -1);
+
+        $yearTemplate = $templates
+            ->filter(static fn (DocumentBatchTemplate $template): bool => $template->year !== null)
+            ->first(static fn (DocumentBatchTemplate $template): bool => (int) $template->year <= $rowYear);
+
+        if ($yearTemplate instanceof DocumentBatchTemplate) {
+            return $yearTemplate;
+        }
+
+        return $templates->first(static fn (DocumentBatchTemplate $template): bool => $template->year === null);
+    }
+
+    /**
+     * @param array<string, string> $rowData
+     */
+    private function extractRegistrationYear(array $rowData): ?int
+    {
+        foreach ($rowData as $header => $value) {
+            if ($this->normalizeHeader($header) !== 'sec_registration_date') {
+                continue;
+            }
+
+            $normalizedValue = trim($value);
+            if ($normalizedValue === '') {
+                return null;
+            }
+
+            $year = $this->extractYearFromSupportedDateFormats($normalizedValue);
+            if ($year !== null) {
+                return $year;
+            }
+
+            if (preg_match('/\b(\d{4})\b/', $normalizedValue, $matches) === 1) {
+                return (int) $matches[1];
+            }
+
+            return null;
+        }
+
+        return null;
+    }
+
+    private function extractYearFromSupportedDateFormats(string $value): ?int
+    {
+        $formats = [
+            'n/j/Y G:i',
+            'n/j/Y H:i',
+            'n/j/Y G:i:s',
+            'n/j/Y H:i:s',
+            'm/d/Y G:i',
+            'm/d/Y H:i',
+            'm/d/Y G:i:s',
+            'm/d/Y H:i:s',
+            'n-d-Y G:i',
+            'n-d-Y H:i',
+            'n-d-Y G:i:s',
+            'n-d-Y H:i:s',
+            'm-d-Y G:i',
+            'm-d-Y H:i',
+            'm-d-Y G:i:s',
+            'm-d-Y H:i:s',
+            'n.j.Y G:i',
+            'n.j.Y H:i',
+            'n.j.Y G:i:s',
+            'n.j.Y H:i:s',
+            'm.d.Y G:i',
+            'm.d.Y H:i',
+            'm.d.Y G:i:s',
+            'm.d.Y H:i:s',
+            'Y-m-d',
+            'Y-m-d H:i',
+            'Y-m-d H:i:s',
+            'Y-m-d G:i',
+            'Y-m-d G:i:s',
+            'Y/m/d',
+            'Y/m/d H:i',
+            'Y/m/d H:i:s',
+            'Y/m/d G:i',
+            'Y/m/d G:i:s',
+            'Y.m.d',
+            'Y.m.d H:i',
+            'Y.m.d H:i:s',
+            'Y.m.d G:i',
+            'Y.m.d G:i:s',
+            'Y-n-j',
+            'Y-n-j H:i',
+            'Y-n-j H:i:s',
+            'Y-n-j G:i',
+            'Y-n-j G:i:s',
+            'Y/n/j',
+            'Y/n/j H:i',
+            'Y/n/j H:i:s',
+            'Y/n/j G:i',
+            'Y/n/j G:i:s',
+            'Y.n.j',
+            'Y.n.j H:i',
+            'Y.n.j H:i:s',
+            'Y.n.j G:i',
+            'Y.n.j G:i:s',
+            'm/d/y G:i',
+            'm/d/y H:i',
+            'm/d/y G:i:s',
+            'm/d/y H:i:s',
+            'm-d-y G:i',
+            'm-d-y H:i',
+            'm-d-y G:i:s',
+            'm-d-y H:i:s',
+            'm.d.y G:i',
+            'm.d.y H:i',
+            'm.d.y G:i:s',
+            'm.d.y H:i:s',
+            'n/j/y G:i',
+            'n/j/y H:i',
+            'n/j/y G:i:s',
+            'n/j/y H:i:s',
+            'n-d-y G:i',
+            'n-d-y H:i',
+            'n-d-y G:i:s',
+            'n-d-y H:i:s',
+            'n.d.y G:i',
+            'n.d.y H:i',
+            'n.d.y G:i:s',
+            'n.d.y H:i:s',
+        ];
+
+        foreach ($formats as $format) {
+            $date = CarbonImmutable::createFromFormat($format, $value);
+            if ($date instanceof CarbonImmutable) {
+                return $date->year;
+            }
+        }
+
+        try {
+            return CarbonImmutable::parse($value)->year;
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    private function normalizeHeader(string $header): string
+    {
+        $normalized = mb_strtolower(trim($header));
+        $normalized = preg_replace('/[^a-z0-9]+/', '_', $normalized) ?? $normalized;
+
+        return trim($normalized, '_');
     }
 
     private function markItemProcessing(int $itemId): void

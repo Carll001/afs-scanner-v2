@@ -61,6 +61,14 @@ class DocumentBatch extends Model
     }
 
     /**
+     * @return HasMany<DocumentBatchTemplate, $this>
+     */
+    public function templates(): HasMany
+    {
+        return $this->hasMany(DocumentBatchTemplate::class);
+    }
+
+    /**
      * @return HasMany<DocumentBatchItemActivityLog, $this>
      */
     public function activityLogs(): HasMany
