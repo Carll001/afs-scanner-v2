@@ -1,11 +1,7 @@
 <script setup lang="ts">
 import { Head, Link } from '@inertiajs/vue3';
 import { computed, reactive, ref } from 'vue';
-import {
-    Alert,
-    AlertDescription,
-    AlertTitle,
-} from '@/components/ui/alert';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
     Card,
@@ -95,7 +91,11 @@ const yearTemplates = ref<EditableYearTemplate[]>(
 const normalizedYearValue = (value: string | number) => String(value).trim();
 
 const sortedTemplates = computed(() =>
-    [...yearTemplates.value].sort((left, right) => Number(normalizedYearValue(left.year)) - Number(normalizedYearValue(right.year))),
+    [...yearTemplates.value].sort(
+        (left, right) =>
+            Number(normalizedYearValue(left.year)) -
+            Number(normalizedYearValue(right.year)),
+    ),
 );
 
 const csrfToken = () => {
@@ -128,7 +128,11 @@ const applyMapping = (payload: TemplateMappingPayload) => {
     newTemplate.errors = {};
 };
 
-const showNotice = (variant: 'default' | 'destructive', title: string, message: string) => {
+const showNotice = (
+    variant: 'default' | 'destructive',
+    title: string,
+    message: string,
+) => {
     notice.value = { variant, title, message };
 };
 
@@ -146,7 +150,10 @@ const parseValidationError = async (response: Response) => {
     return validationError;
 };
 
-const sendForm = async (url: string, formData: FormData): Promise<TemplateMappingPayload> => {
+const sendForm = async (
+    url: string,
+    formData: FormData,
+): Promise<TemplateMappingPayload> => {
     const response = await fetch(url, {
         method: 'POST',
         body: formData,
@@ -217,9 +224,9 @@ const rangeText = (templateId: number) => {
 const hasDuplicateYear = (templateId: number, year: string) =>
     yearTemplates.value.some(
         (template) =>
-            template.id !== templateId
-            && normalizedYearValue(template.year) !== ''
-            && normalizedYearValue(template.year) === normalizedYearValue(year),
+            template.id !== templateId &&
+            normalizedYearValue(template.year) !== '' &&
+            normalizedYearValue(template.year) === normalizedYearValue(year),
     );
 
 const onDefaultTemplateFileChange = (event: Event) => {
@@ -232,7 +239,10 @@ const onNewTemplateFileChange = (event: Event) => {
     newTemplate.file = input.files?.[0] ?? null;
 };
 
-const onExistingTemplateFileChange = (template: EditableYearTemplate, event: Event) => {
+const onExistingTemplateFileChange = (
+    template: EditableYearTemplate,
+    event: Event,
+) => {
     const input = event.target as HTMLInputElement;
     template.file = input.files?.[0] ?? null;
 };
@@ -251,13 +261,30 @@ const updateDefaultTemplate = async () => {
     try {
         const formData = new FormData();
         formData.append('template_file', defaultTemplateFile.value);
-        applyMapping(await sendForm('/document-generator/templates/default', formData));
-        showNotice('default', 'Default template updated', 'Future batches will use the new default template.');
+        applyMapping(
+            await sendForm('/document-generator/templates/default', formData),
+        );
+        showNotice(
+            'default',
+            'Default template updated',
+            'Future batches will use the new default template.',
+        );
     } catch (error) {
         if (error instanceof Error && 'validationErrors' in error) {
-            defaultTemplateErrors.value = (error as Error & { validationErrors?: Record<string, string[]> }).validationErrors ?? {};
+            defaultTemplateErrors.value =
+                (
+                    error as Error & {
+                        validationErrors?: Record<string, string[]>;
+                    }
+                ).validationErrors ?? {};
         }
-        showNotice('destructive', 'Default template was not updated', error instanceof Error ? error.message : 'Unable to update the default template.');
+        showNotice(
+            'destructive',
+            'Default template was not updated',
+            error instanceof Error
+                ? error.message
+                : 'Unable to update the default template.',
+        );
     } finally {
         defaultTemplateSaving.value = false;
     }
@@ -270,7 +297,9 @@ const createYearTemplate = async () => {
     if (normalizedYear === '' || !newTemplate.file) {
         newTemplate.errors = {
             ...(normalizedYear === '' ? { year: ['Year is required.'] } : {}),
-            ...(!newTemplate.file ? { template_file: ['Template file is required.'] } : {}),
+            ...(!newTemplate.file
+                ? { template_file: ['Template file is required.'] }
+                : {}),
         };
         return;
     }
@@ -289,12 +318,27 @@ const createYearTemplate = async () => {
         formData.append('year', normalizedYear);
         formData.append('template_file', newTemplate.file);
         applyMapping(await sendForm('/document-generator/templates', formData));
-        showNotice('default', 'Year template added', 'Future batches will use the new year rule.');
+        showNotice(
+            'default',
+            'Year template added',
+            'Future batches will use the new year rule.',
+        );
     } catch (error) {
         if (error instanceof Error && 'validationErrors' in error) {
-            newTemplate.errors = (error as Error & { validationErrors?: Record<string, string[]> }).validationErrors ?? {};
+            newTemplate.errors =
+                (
+                    error as Error & {
+                        validationErrors?: Record<string, string[]>;
+                    }
+                ).validationErrors ?? {};
         }
-        showNotice('destructive', 'Year template was not added', error instanceof Error ? error.message : 'Unable to add the year template.');
+        showNotice(
+            'destructive',
+            'Year template was not added',
+            error instanceof Error
+                ? error.message
+                : 'Unable to add the year template.',
+        );
     } finally {
         newTemplate.saving = false;
     }
@@ -310,7 +354,9 @@ const updateYearTemplate = async (template: EditableYearTemplate) => {
     }
 
     if (hasDuplicateYear(template.id, normalizedYear)) {
-        template.errors = { year: ['Year template entries must use unique years.'] };
+        template.errors = {
+            year: ['Year template entries must use unique years.'],
+        };
         return;
     }
 
@@ -323,13 +369,33 @@ const updateYearTemplate = async (template: EditableYearTemplate) => {
             formData.append('template_file', template.file);
         }
 
-        applyMapping(await sendForm(`/document-generator/templates/${template.id}/update`, formData));
-        showNotice('default', 'Year template updated', 'The template mapping has been updated.');
+        applyMapping(
+            await sendForm(
+                `/document-generator/templates/${template.id}/update`,
+                formData,
+            ),
+        );
+        showNotice(
+            'default',
+            'Year template updated',
+            'The template mapping has been updated.',
+        );
     } catch (error) {
         if (error instanceof Error && 'validationErrors' in error) {
-            template.errors = (error as Error & { validationErrors?: Record<string, string[]> }).validationErrors ?? {};
+            template.errors =
+                (
+                    error as Error & {
+                        validationErrors?: Record<string, string[]>;
+                    }
+                ).validationErrors ?? {};
         }
-        showNotice('destructive', 'Year template was not updated', error instanceof Error ? error.message : 'Unable to update the year template.');
+        showNotice(
+            'destructive',
+            'Year template was not updated',
+            error instanceof Error
+                ? error.message
+                : 'Unable to update the year template.',
+        );
     } finally {
         template.saving = false;
     }
@@ -339,10 +405,22 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
     template.deleting = true;
 
     try {
-        applyMapping(await sendDelete(`/document-generator/templates/${template.id}`));
-        showNotice('default', 'Year template removed', 'The year rule has been removed.');
+        applyMapping(
+            await sendDelete(`/document-generator/templates/${template.id}`),
+        );
+        showNotice(
+            'default',
+            'Year template removed',
+            'The year rule has been removed.',
+        );
     } catch (error) {
-        showNotice('destructive', 'Year template was not removed', error instanceof Error ? error.message : 'Unable to remove the year template.');
+        showNotice(
+            'destructive',
+            'Year template was not removed',
+            error instanceof Error
+                ? error.message
+                : 'Unable to remove the year template.',
+        );
     } finally {
         template.deleting = false;
     }
@@ -354,16 +432,23 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
 
     <AppLayout :breadcrumbs="breadcrumbs">
         <div class="space-y-6 p-4">
-            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div
+                class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
+            >
                 <div>
-                    <h1 class="text-2xl font-semibold tracking-tight">Template Mapping</h1>
+                    <h1 class="text-2xl font-semibold tracking-tight">
+                        Template Mapping
+                    </h1>
                     <p class="text-sm text-muted-foreground">
-                        Set the global default and threshold-based year rules used by future document batches.
+                        Set the global default and threshold-based year rules
+                        used by future document batches.
                     </p>
                 </div>
 
                 <Button variant="outline" as-child>
-                    <Link :href="documentGeneratorRoutes.index()">Back to Document Generator</Link>
+                    <Link :href="documentGeneratorRoutes.index()"
+                        >Back to Document Generator</Link
+                    >
                 </Button>
             </div>
 
@@ -381,9 +466,16 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
                 </CardHeader>
                 <CardContent class="space-y-3">
                     <div class="rounded-lg border p-4">
-                        <div class="grid grid-cols-[140px_minmax(0,1fr)] gap-3 text-sm">
+                        <div
+                            class="grid grid-cols-[140px_minmax(0,1fr)] gap-3 text-sm"
+                        >
                             <p class="font-medium">Default</p>
-                            <p>{{ mapping.default_template?.template_name ?? 'No default template yet' }}</p>
+                            <p>
+                                {{
+                                    mapping.default_template?.template_name ??
+                                    'No default template yet'
+                                }}
+                            </p>
                         </div>
                     </div>
 
@@ -392,16 +484,23 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
                         :key="template.id"
                         class="rounded-lg border p-4"
                     >
-                        <div class="grid grid-cols-[140px_minmax(0,1fr)] gap-3 text-sm">
+                        <div
+                            class="grid grid-cols-[140px_minmax(0,1fr)] gap-3 text-sm"
+                        >
                             <p class="font-medium">{{ template.year }}</p>
                             <div>
                                 <p>{{ template.template_name }}</p>
-                                <p class="text-xs text-muted-foreground">{{ rangeText(template.id) }}</p>
+                                <p class="text-xs text-muted-foreground">
+                                    {{ rangeText(template.id) }}
+                                </p>
                             </div>
                         </div>
                     </div>
 
-                    <div v-if="sortedTemplates.length === 0" class="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+                    <div
+                        v-if="sortedTemplates.length === 0"
+                        class="rounded-lg border border-dashed p-4 text-sm text-muted-foreground"
+                    >
                         No year templates configured yet.
                     </div>
                 </CardContent>
@@ -412,16 +511,31 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
                     <CardTitle>Default Template</CardTitle>
                     <CardDescription>{{ defaultRangeText }}</CardDescription>
                 </CardHeader>
-                <CardContent class="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+                <CardContent
+                    class="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end"
+                >
                     <div class="grid gap-2">
-                        <Label for="default-template-file">Replace default DOCX</Label>
-                        <Input id="default-template-file" type="file" accept=".docx" @change="onDefaultTemplateFileChange" />
-                        <p v-if="defaultTemplateErrors.template_file" class="text-sm text-destructive">
+                        <Label for="default-template-file"
+                            >Replace default DOCX</Label
+                        >
+                        <Input
+                            id="default-template-file"
+                            type="file"
+                            accept=".docx"
+                            @change="onDefaultTemplateFileChange"
+                        />
+                        <p
+                            v-if="defaultTemplateErrors.template_file"
+                            class="text-sm text-destructive"
+                        >
                             {{ defaultTemplateErrors.template_file[0] }}
                         </p>
                     </div>
 
-                    <Button :disabled="defaultTemplateSaving" @click="updateDefaultTemplate">
+                    <Button
+                        :disabled="defaultTemplateSaving"
+                        @click="updateDefaultTemplate"
+                    >
                         <Spinner v-if="defaultTemplateSaving" class="size-4" />
                         Save Default
                     </Button>
@@ -431,55 +545,140 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
             <Card>
                 <CardHeader>
                     <CardTitle>Year Templates</CardTitle>
-                    <CardDescription>Add and edit the global year rules.</CardDescription>
+                    <CardDescription
+                        >Add and edit the global year rules.</CardDescription
+                    >
                 </CardHeader>
                 <CardContent class="space-y-4">
-                    <div class="grid gap-4 rounded-lg border p-4 lg:grid-cols-[160px_minmax(0,1fr)_auto] lg:items-end">
+                    <div
+                        class="grid gap-4 rounded-lg border p-4 lg:grid-cols-[160px_minmax(0,1fr)_auto] lg:items-end"
+                    >
                         <div class="grid gap-2">
                             <Label for="new-template-year">Year</Label>
-                            <Input id="new-template-year" v-model="newTemplate.year" type="number" min="1900" max="9999" placeholder="2025" />
-                            <p v-if="newTemplate.errors.year" class="text-sm text-destructive">{{ newTemplate.errors.year[0] }}</p>
+                            <Input
+                                id="new-template-year"
+                                v-model="newTemplate.year"
+                                type="number"
+                                min="1900"
+                                max="9999"
+                                placeholder="2025"
+                            />
+                            <p
+                                v-if="newTemplate.errors.year"
+                                class="text-sm text-destructive"
+                            >
+                                {{ newTemplate.errors.year[0] }}
+                            </p>
                         </div>
 
                         <div class="grid gap-2">
                             <Label for="new-template-file">DOCX Template</Label>
-                            <Input id="new-template-file" type="file" accept=".docx" @change="onNewTemplateFileChange" />
-                            <p v-if="newTemplate.errors.template_file" class="text-sm text-destructive">{{ newTemplate.errors.template_file[0] }}</p>
+                            <Input
+                                id="new-template-file"
+                                type="file"
+                                accept=".docx"
+                                @change="onNewTemplateFileChange"
+                            />
+                            <p
+                                v-if="newTemplate.errors.template_file"
+                                class="text-sm text-destructive"
+                            >
+                                {{ newTemplate.errors.template_file[0] }}
+                            </p>
                         </div>
 
-                        <Button :disabled="newTemplate.saving" @click="createYearTemplate">
+                        <Button
+                            :disabled="newTemplate.saving"
+                            @click="createYearTemplate"
+                        >
                             <Spinner v-if="newTemplate.saving" class="size-4" />
                             Add Year Rule
                         </Button>
                     </div>
 
-                    <div v-for="template in sortedTemplates" :key="`editor-${template.id}`" class="space-y-3 rounded-lg border p-4">
+                    <div
+                        v-for="template in sortedTemplates"
+                        :key="`editor-${template.id}`"
+                        class="space-y-3 rounded-lg border p-4"
+                    >
                         <div>
-                            <p class="font-medium">{{ template.template_name }}</p>
-                            <p class="text-sm text-muted-foreground">{{ rangeText(template.id) }}</p>
+                            <p class="font-medium">
+                                {{ template.template_name }}
+                            </p>
+                            <p class="text-sm text-muted-foreground">
+                                {{ rangeText(template.id) }}
+                            </p>
                         </div>
 
-                        <div class="grid gap-4 lg:grid-cols-[160px_minmax(0,1fr)_auto_auto] lg:items-end">
+                        <div
+                            class="grid gap-4 lg:grid-cols-[160px_minmax(0,1fr)_auto_auto] lg:items-end"
+                        >
                             <div class="grid gap-2">
-                                <Label :for="`template-year-${template.id}`">Year</Label>
-                                <Input :id="`template-year-${template.id}`" v-model="template.year" type="number" min="1900" max="9999" />
-                                <p v-if="template.errors.year" class="text-sm text-destructive">{{ template.errors.year[0] }}</p>
+                                <Label :for="`template-year-${template.id}`"
+                                    >Year</Label
+                                >
+                                <Input
+                                    :id="`template-year-${template.id}`"
+                                    v-model="template.year"
+                                    type="number"
+                                    min="1900"
+                                    max="9999"
+                                />
+                                <p
+                                    v-if="template.errors.year"
+                                    class="text-sm text-destructive"
+                                >
+                                    {{ template.errors.year[0] }}
+                                </p>
                             </div>
 
                             <div class="grid gap-2">
-                                <Label :for="`template-file-${template.id}`">Replace DOCX</Label>
-                                <Input :id="`template-file-${template.id}`" type="file" accept=".docx" @change="(event) => onExistingTemplateFileChange(template, event)" />
-                                <p class="text-xs text-muted-foreground">Leave empty if you only want to change the year.</p>
-                                <p v-if="template.errors.template_file" class="text-sm text-destructive">{{ template.errors.template_file[0] }}</p>
+                                <Label :for="`template-file-${template.id}`"
+                                    >Replace DOCX</Label
+                                >
+                                <Input
+                                    :id="`template-file-${template.id}`"
+                                    type="file"
+                                    accept=".docx"
+                                    @change="
+                                        onExistingTemplateFileChange(
+                                            template,
+                                            $event,
+                                        )
+                                    "
+                                />
+                                <p class="text-xs text-muted-foreground">
+                                    Leave empty if you only want to change the
+                                    year.
+                                </p>
+                                <p
+                                    v-if="template.errors.template_file"
+                                    class="text-sm text-destructive"
+                                >
+                                    {{ template.errors.template_file[0] }}
+                                </p>
                             </div>
 
-                            <Button :disabled="template.saving" @click="updateYearTemplate(template)">
-                                <Spinner v-if="template.saving" class="size-4" />
+                            <Button
+                                :disabled="template.saving"
+                                @click="updateYearTemplate(template)"
+                            >
+                                <Spinner
+                                    v-if="template.saving"
+                                    class="size-4"
+                                />
                                 Save
                             </Button>
 
-                            <Button variant="outline" :disabled="template.deleting" @click="removeYearTemplate(template)">
-                                <Spinner v-if="template.deleting" class="size-4" />
+                            <Button
+                                variant="outline"
+                                :disabled="template.deleting"
+                                @click="removeYearTemplate(template)"
+                            >
+                                <Spinner
+                                    v-if="template.deleting"
+                                    class="size-4"
+                                />
                                 Remove
                             </Button>
                         </div>

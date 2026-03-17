@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { Head, Link } from '@inertiajs/vue3';
-import { ArrowRight, CheckCircle2, Files, FolderKanban, Sparkles } from 'lucide-vue-next';
+import {
+    ArrowRight,
+    CheckCircle2,
+    Files,
+    FolderKanban,
+    Sparkles,
+} from 'lucide-vue-next';
 import { dashboard, login, register } from '@/routes';
 import documentGeneratorRoutes from '@/routes/document-generator';
 import generatedFilesRoutes from '@/routes/generated-files';
@@ -79,18 +85,22 @@ const workflow = [
     <Head title="Welcome" />
 
     <div
-        class="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(244,114,36,0.2),_transparent_34%),radial-gradient(circle_at_80%_20%,_rgba(14,165,233,0.16),_transparent_28%),linear-gradient(180deg,_#fffdf8_0%,_#fff7ed_42%,_#ffffff_100%)] text-slate-950 dark:bg-[radial-gradient(circle_at_top_left,_rgba(249,115,22,0.16),_transparent_28%),radial-gradient(circle_at_80%_20%,_rgba(14,165,233,0.14),_transparent_24%),linear-gradient(180deg,_#020617_0%,_#111827_54%,_#020617_100%)] dark:text-white"
+        class="min-h-screen bg-[linear-gradient(180deg,_#f8fafc_0%,_#e2e8f0_100%)] text-slate-950 dark:bg-[linear-gradient(180deg,_#020617_0%,_#111827_54%,_#020617_100%)] dark:text-white"
     >
-        <div class="mx-auto flex min-h-screen w-full max-w-7xl flex-col px-6 py-6 lg:px-10 lg:py-8">
+        <div
+            class="mx-auto flex min-h-screen w-full max-w-7xl flex-col px-6 py-6 lg:px-10 lg:py-8"
+        >
             <header class="flex items-center justify-between gap-4">
                 <div class="flex items-center gap-3">
                     <div
-                        class="flex h-11 w-11 items-center justify-center rounded-2xl border border-orange-500/20 bg-orange-500 text-sm font-semibold text-white shadow-lg shadow-orange-500/20"
+                        class="flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-800/10 bg-slate-950 text-sm font-semibold text-white shadow-lg shadow-slate-950/15"
                     >
                         AFS
                     </div>
                     <div>
-                        <p class="text-sm font-semibold tracking-[0.24em] text-orange-600 uppercase dark:text-orange-300">
+                        <p
+                            class="text-sm font-semibold tracking-[0.24em] text-slate-700 uppercase dark:text-slate-200"
+                        >
                             AFS Scanner
                         </p>
                         <p class="text-sm text-slate-600 dark:text-slate-300">
@@ -126,36 +136,59 @@ const workflow = [
             </header>
 
             <main class="flex flex-1 flex-col gap-10 py-10 lg:gap-14 lg:py-14">
-                <section class="grid items-center gap-8 lg:grid-cols-[1.15fr_0.85fr]">
+                <section
+                    class="grid items-center gap-8 lg:grid-cols-[1.15fr_0.85fr]"
+                >
                     <div class="space-y-8">
                         <div
-                            class="inline-flex items-center gap-2 rounded-full border border-orange-500/20 bg-white/70 px-4 py-2 text-sm text-slate-700 shadow-sm backdrop-blur dark:border-orange-400/20 dark:bg-white/5 dark:text-slate-200"
+                            class="inline-flex items-center gap-2 rounded-full border border-slate-300/80 bg-white/70 px-4 py-2 text-sm text-slate-700 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5 dark:text-slate-200"
                         >
-                            <CheckCircle2 class="h-4 w-4 text-orange-500" />
+                            <CheckCircle2
+                                class="h-4 w-4 text-slate-700 dark:text-slate-200"
+                            />
                             Built for repeatable document generation and review
                         </div>
 
                         <div class="space-y-5">
-                            <h1 class="max-w-3xl text-5xl leading-tight font-semibold tracking-tight text-balance lg:text-7xl">
-                                Turn spreadsheet rows into organized document batches.
+                            <h1
+                                class="max-w-3xl text-5xl leading-tight font-semibold tracking-tight text-balance lg:text-7xl"
+                            >
+                                Turn spreadsheet rows into organized document
+                                batches.
                             </h1>
-                            <p class="max-w-2xl text-lg leading-8 text-slate-600 dark:text-slate-300">
-                                A more useful welcome page for this app should lead people straight into the workflow:
-                                generate documents, manage template mapping, and review generated outputs without the
-                                default starter content.
+                            <p
+                                class="max-w-2xl text-lg leading-8 text-slate-600 dark:text-slate-300"
+                            >
+                                A more useful welcome page for this app should
+                                lead people straight into the workflow: generate
+                                documents, manage template mapping, and review
+                                generated outputs without the default starter
+                                content.
                             </p>
                         </div>
 
                         <div class="flex flex-col gap-3 sm:flex-row">
                             <Link
-                                :href="$page.props.auth.user ? dashboard() : login()"
-                                class="inline-flex items-center justify-center gap-2 rounded-full bg-orange-500 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-orange-500/25 transition hover:bg-orange-400"
+                                :href="
+                                    $page.props.auth.user
+                                        ? dashboard()
+                                        : login()
+                                "
+                                class="inline-flex items-center justify-center gap-2 rounded-full bg-slate-950 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-950/20 transition hover:bg-slate-800 dark:bg-white dark:text-slate-950 dark:hover:bg-slate-100"
                             >
-                                {{ $page.props.auth.user ? 'Open dashboard' : 'Start with login' }}
+                                {{
+                                    $page.props.auth.user
+                                        ? 'Open dashboard'
+                                        : 'Start with login'
+                                }}
                                 <ArrowRight class="h-4 w-4" />
                             </Link>
                             <Link
-                                :href="$page.props.auth.user ? documentGeneratorRoutes.index().url : login()"
+                                :href="
+                                    $page.props.auth.user
+                                        ? documentGeneratorRoutes.index().url
+                                        : login()
+                                "
                                 class="inline-flex items-center justify-center rounded-full border border-slate-300/80 bg-white/75 px-6 py-3 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-white dark:border-white/15 dark:bg-white/5 dark:text-slate-100 dark:hover:bg-white/10"
                             >
                                 View document generator
@@ -168,10 +201,14 @@ const workflow = [
                                 :key="item.label"
                                 class="rounded-3xl border border-white/70 bg-white/70 p-5 shadow-sm backdrop-blur dark:border-white/10 dark:bg-white/5"
                             >
-                                <p class="text-sm text-slate-500 dark:text-slate-400">
+                                <p
+                                    class="text-sm text-slate-500 dark:text-slate-400"
+                                >
                                     {{ item.label }}
                                 </p>
-                                <p class="mt-2 text-lg font-semibold text-slate-950 dark:text-white">
+                                <p
+                                    class="mt-2 text-lg font-semibold text-slate-950 dark:text-white"
+                                >
                                     {{ item.value }}
                                 </p>
                             </div>
@@ -180,61 +217,113 @@ const workflow = [
 
                     <div class="relative">
                         <div
-                            class="absolute inset-0 rounded-[2rem] bg-gradient-to-br from-orange-500/20 via-sky-400/10 to-transparent blur-3xl"
+                            class="absolute inset-0 rounded-[2rem] bg-gradient-to-br from-slate-900/18 via-slate-500/8 to-transparent blur-3xl"
                         />
                         <div
-                            class="relative overflow-hidden rounded-[2rem] border border-white/70 bg-slate-950 p-6 text-white shadow-2xl shadow-slate-950/20 dark:border-white/10"
+                            class="relative overflow-hidden rounded-[2rem] border border-white/70 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 p-6 text-white shadow-2xl shadow-slate-950/20 dark:border-white/10"
                         >
-                            <div class="flex flex-col items-start gap-3 sm:flex-row sm:items-start sm:justify-between">
+                            <div
+                                class="flex flex-col items-start gap-3 sm:flex-row sm:items-start sm:justify-between"
+                            >
                                 <div>
-                                    <p class="text-sm font-medium text-orange-300">Live workflow snapshot</p>
-                                    <h2 class="mt-1 text-2xl font-semibold">Welcome page recommendation</h2>
+                                    <p
+                                        class="text-sm font-medium text-slate-300"
+                                    >
+                                        Live workflow snapshot
+                                    </p>
+                                    <h2 class="mt-1 text-2xl font-semibold">
+                                        Welcome page recommendation
+                                    </h2>
                                 </div>
                                 <div
-                                    class="inline-flex shrink-0 rounded-full bg-white/10 px-3 py-1 text-xs tracking-[0.24em] uppercase text-slate-200"
+                                    class="inline-flex shrink-0 rounded-full bg-white/10 px-3 py-1 text-xs tracking-[0.24em] text-slate-200 uppercase"
                                 >
                                     Product-first
                                 </div>
                             </div>
 
                             <div class="mt-6 space-y-4">
-                                <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
-                                    <div class="flex items-center justify-between text-sm">
-                                        <span class="text-slate-300">Default template ready</span>
-                                        <span class="rounded-full bg-emerald-400/15 px-2.5 py-1 text-emerald-300">
+                                <div
+                                    class="rounded-2xl border border-white/10 bg-white/5 p-4"
+                                >
+                                    <div
+                                        class="flex items-center justify-between text-sm"
+                                    >
+                                        <span class="text-slate-300"
+                                            >Default template ready</span
+                                        >
+                                        <span
+                                            class="rounded-full bg-emerald-400/15 px-2.5 py-1 text-emerald-300"
+                                        >
                                             Connected
                                         </span>
                                     </div>
-                                    <div class="mt-4 h-2 rounded-full bg-white/10">
-                                        <div class="h-2 w-[72%] rounded-full bg-gradient-to-r from-orange-400 to-sky-400" />
+                                    <div
+                                        class="mt-4 h-2 rounded-full bg-white/10"
+                                    >
+                                        <div
+                                            class="h-2 w-[72%] rounded-full bg-gradient-to-r from-slate-200 to-slate-400"
+                                        />
                                     </div>
                                     <p class="mt-3 text-xs text-slate-400">
-                                        Batch progress visibility should be previewed here to reinforce the main use case.
+                                        Batch progress visibility should be
+                                        previewed here to reinforce the main use
+                                        case.
                                     </p>
                                 </div>
 
                                 <div class="grid gap-3 sm:grid-cols-2">
-                                    <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
-                                        <p class="text-xs tracking-[0.24em] uppercase text-slate-400">Core area</p>
-                                        <p class="mt-2 text-lg font-semibold">Template Mapping</p>
+                                    <div
+                                        class="rounded-2xl border border-white/10 bg-white/5 p-4"
+                                    >
+                                        <p
+                                            class="text-xs tracking-[0.24em] text-slate-400 uppercase"
+                                        >
+                                            Core area
+                                        </p>
+                                        <p class="mt-2 text-lg font-semibold">
+                                            Template Mapping
+                                        </p>
                                         <p class="mt-2 text-sm text-slate-300">
-                                            Make mappings and fallback rules easy to discover from the first screen.
+                                            Make mappings and fallback rules
+                                            easy to discover from the first
+                                            screen.
                                         </p>
                                     </div>
-                                    <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
-                                        <p class="text-xs tracking-[0.24em] uppercase text-slate-400">Core area</p>
-                                        <p class="mt-2 text-lg font-semibold">Generated Files</p>
+                                    <div
+                                        class="rounded-2xl border border-white/10 bg-white/5 p-4"
+                                    >
+                                        <p
+                                            class="text-xs tracking-[0.24em] text-slate-400 uppercase"
+                                        >
+                                            Core area
+                                        </p>
+                                        <p class="mt-2 text-lg font-semibold">
+                                            Generated Files
+                                        </p>
                                         <p class="mt-2 text-sm text-slate-300">
-                                            Users should instantly know where to review completed outputs and history.
+                                            Users should instantly know where to
+                                            review completed outputs and
+                                            history.
                                         </p>
                                     </div>
                                 </div>
 
-                                <div class="rounded-2xl border border-orange-400/25 bg-orange-400/10 p-4">
-                                    <p class="text-sm font-medium text-orange-200">Recommended direction</p>
-                                    <p class="mt-2 text-sm leading-6 text-slate-200">
-                                        Keep this page as a lightweight product landing page, then let the authenticated
-                                        experience do the heavier work inside the dashboard and generator screens.
+                                <div
+                                    class="rounded-2xl border border-white/10 bg-white/5 p-4"
+                                >
+                                    <p
+                                        class="text-sm font-medium text-slate-200"
+                                    >
+                                        Recommended direction
+                                    </p>
+                                    <p
+                                        class="mt-2 text-sm leading-6 text-slate-200"
+                                    >
+                                        Keep this page as a lightweight product
+                                        landing page, then let the authenticated
+                                        experience do the heavier work inside
+                                        the dashboard and generator screens.
                                     </p>
                                 </div>
                             </div>
@@ -251,32 +340,49 @@ const workflow = [
                     >
                         <component
                             :is="card.icon"
-                            class="h-11 w-11 rounded-2xl bg-orange-100 p-3 text-orange-600 dark:bg-orange-400/15 dark:text-orange-300"
+                            class="h-11 w-11 rounded-2xl bg-slate-100 p-3 text-slate-700 dark:bg-white/10 dark:text-slate-200"
                         />
-                        <h3 class="mt-5 text-xl font-semibold text-slate-950 dark:text-white">
+                        <h3
+                            class="mt-5 text-xl font-semibold text-slate-950 dark:text-white"
+                        >
                             {{ card.title }}
                         </h3>
-                        <p class="mt-3 text-sm leading-7 text-slate-600 dark:text-slate-300">
+                        <p
+                            class="mt-3 text-sm leading-7 text-slate-600 dark:text-slate-300"
+                        >
                             {{ card.description }}
                         </p>
-                        <div class="mt-5 inline-flex items-center gap-2 text-sm font-medium text-orange-600 dark:text-orange-300">
+                        <div
+                            class="mt-5 inline-flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200"
+                        >
                             Explore this section
-                            <ArrowRight class="h-4 w-4 transition group-hover:translate-x-1" />
+                            <ArrowRight
+                                class="h-4 w-4 transition group-hover:translate-x-1"
+                            />
                         </div>
                     </Link>
                 </section>
 
-                <section class="rounded-[2rem] border border-slate-200/80 bg-white/80 p-6 shadow-sm dark:border-white/10 dark:bg-white/5 lg:p-8">
+                <section
+                    class="rounded-[2rem] border border-slate-200/80 bg-white/80 p-6 shadow-sm lg:p-8 dark:border-white/10 dark:bg-white/5"
+                >
                     <div class="mb-6 max-w-2xl space-y-3">
-                        <p class="text-sm font-semibold tracking-[0.24em] text-orange-600 uppercase dark:text-orange-300">
+                        <p
+                            class="text-sm font-semibold tracking-[0.24em] text-slate-700 uppercase dark:text-slate-300"
+                        >
                             Simple Workflow
                         </p>
-                        <h2 class="text-3xl font-semibold tracking-tight text-balance">
+                        <h2
+                            class="text-3xl font-semibold tracking-tight text-balance"
+                        >
                             From source file to generated output
                         </h2>
-                        <p class="text-base leading-8 text-slate-600 dark:text-slate-300">
-                            Keep the landing page focused on what users actually do inside the app: prepare files, map
-                            templates, and review generated documents.
+                        <p
+                            class="text-base leading-8 text-slate-600 dark:text-slate-300"
+                        >
+                            Keep the landing page focused on what users actually
+                            do inside the app: prepare files, map templates, and
+                            review generated documents.
                         </p>
                     </div>
 
@@ -286,13 +392,19 @@ const workflow = [
                             :key="item.step"
                             class="rounded-[1.5rem] border border-slate-200/80 bg-white p-5 dark:border-white/10 dark:bg-slate-950/40"
                         >
-                            <p class="text-sm font-semibold tracking-[0.2em] text-orange-500 uppercase">
+                            <p
+                                class="text-sm font-semibold tracking-[0.2em] text-slate-600 uppercase dark:text-slate-400"
+                            >
                                 {{ item.step }}
                             </p>
-                            <h3 class="mt-3 text-lg font-semibold text-slate-950 dark:text-white">
+                            <h3
+                                class="mt-3 text-lg font-semibold text-slate-950 dark:text-white"
+                            >
                                 {{ item.title }}
                             </h3>
-                            <p class="mt-3 text-sm leading-7 text-slate-600 dark:text-slate-300">
+                            <p
+                                class="mt-3 text-sm leading-7 text-slate-600 dark:text-slate-300"
+                            >
                                 {{ item.description }}
                             </p>
                         </div>
