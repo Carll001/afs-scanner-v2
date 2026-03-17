@@ -358,7 +358,7 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
                 <div>
                     <h1 class="text-2xl font-semibold tracking-tight">Template Mapping</h1>
                     <p class="text-sm text-muted-foreground">
-                        Set the global default and year-based templates used by future document batches.
+                        Set the global default and threshold-based year rules used by future document batches.
                     </p>
                 </div>
 

@@ -1020,6 +1020,62 @@ class DocumentGeneratorTest extends TestCase
         }
     }
 
+    public function test_job_uses_2025_threshold_template_for_single_digit_excel_datetime_format(): void
+    {
+        Storage::fake('local');
+
+        $batch = $this->createBatchWithTemplate();
+        DocumentBatchTemplate::factory()->create([
+            'document_batch_id' => $batch->id,
+            'year' => 2025,
+            'template_name' => 'template-2025.docx',
+            'template_path' => 'document-generator/template-2025.docx',
+        ]);
+        Storage::disk('local')->put('document-generator/template-2025.docx', 'template-2025-content');
+
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 2,
+            'row_data' => ['SEC REGISTRATION DATE' => '10/3/2025 0:00'],
+            'status' => 'queued',
+        ]);
+
+        $docxService = Mockery::mock(DocxTemplateService::class);
+        $docxService->shouldReceive('validateRowData')
+            ->once()
+            ->withArgs(function (string $templatePath): bool {
+                return str_ends_with($templatePath, 'document-generator/template-2025.docx');
+            })
+            ->andReturn(['missing_data' => []]);
+        $docxService->shouldReceive('render')
+            ->once()
+            ->withArgs(function (string $templatePath): bool {
+                return str_ends_with($templatePath, 'document-generator/template-2025.docx');
+            }, Mockery::type('string'), Mockery::type('array'))
+            ->andReturnUsing(function (string $templatePath, string $outputPath): void {
+                file_put_contents($outputPath, 'docx-content');
+            });
+
+        $pdfService = Mockery::mock(PdfConversionService::class);
+        $pdfService->shouldReceive('convertDocxToPdf')
+            ->once()
+            ->andReturnUsing(function (string $docxPath): string {
+                $pdfPath = preg_replace('/\.docx$/', '.pdf', $docxPath);
+                file_put_contents((string) $pdfPath, 'pdf-content');
+
+                return (string) $pdfPath;
+            });
+
+        (new GenerateDocumentBatchItemJob($item->id))->handle(
+            app(\App\Services\DocumentBatchActivityLogger::class),
+            $docxService,
+            $pdfService,
+        );
+
+        $item->refresh();
+        $this->assertSame('pdf_done', $item->status);
+    }
+
     public function test_job_uses_nearest_lower_threshold_when_between_configured_years(): void
     {
         Storage::fake('local');
@@ -1101,6 +1157,10 @@ class DocumentGeneratorTest extends TestCase
             ['sec registration date', '07-23-2025'],
             ['Sec/Registration Date', '2025/07/23'],
             ['SEC REGISTRATION DATE', '07/23/2025 00:00:00'],
+            ['SEC REGISTRATION DATE', '10/3/2025 0:00'],
+            ['SEC REGISTRATION DATE', '10/03/2025 0:00'],
+            ['SEC REGISTRATION DATE', '10/3/2025 00:00'],
+            ['SEC REGISTRATION DATE', '2025.7.3 0:00'],
             ['SEC REGISTRATION DATE', '2025.07.23 00:00'],
         ] as [$header, $dateValue]) {
             $item = DocumentBatchItem::factory()->create([

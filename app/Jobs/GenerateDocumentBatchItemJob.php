@@ -293,9 +293,14 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
         ];
 
         foreach ($formats as $format) {
-            $date = CarbonImmutable::createFromFormat($format, $value);
-            if ($date instanceof CarbonImmutable) {
-                return $date->year;
+            $date = \DateTimeImmutable::createFromFormat('!'.$format, $value);
+            $errors = \DateTimeImmutable::getLastErrors();
+
+            if (
+                $date instanceof \DateTimeImmutable
+                && ($errors === false || (($errors['warning_count'] ?? 0) === 0 && ($errors['error_count'] ?? 0) === 0))
+            ) {
+                return (int) $date->format('Y');
             }
         }
 

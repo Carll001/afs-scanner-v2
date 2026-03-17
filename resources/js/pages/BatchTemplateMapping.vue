@@ -516,7 +516,7 @@ const onExistingTemplateFileChange = (template: EditableYearTemplate, event: Eve
                 <CardHeader>
                     <CardTitle>Year Template Rules</CardTitle>
                     <CardDescription>
-                        Each configured year applies from that year until the next year rule takes over.
+                        Each configured year works as a threshold and applies until the next higher year rule takes over.
                     </CardDescription>
                 </CardHeader>
                 <CardContent class="space-y-4">

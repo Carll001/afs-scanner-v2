@@ -580,6 +580,24 @@ const docxUrlForItem = (item: BatchItem) =>
         type: 'docx',
     });
 
+const normalizeHeader = (header: string) =>
+    header.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
+const extractSecRegistrationYear = (rowData: Record<string, string>) => {
+    for (const [header, value] of Object.entries(rowData)) {
+        if (normalizeHeader(header) !== 'sec_registration_date') {
+            continue;
+        }
+
+        const match = value.match(/\b(\d{4})\b/);
+        if (match) {
+            return match[1];
+        }
+    }
+
+    return null;
+};
+
 const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
     {
         id: 'row_number',
@@ -593,6 +611,12 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
         header: 'Company',
         enableSorting: false,
         cell: ({ row }) => row.original.company || '-',
+    },
+    {
+        id: 'sec_registration_year',
+        header: 'Year',
+        enableSorting: false,
+        cell: ({ row }) => extractSecRegistrationYear(row.original.row_data) ?? '-',
     },
     {
         id: 'status',

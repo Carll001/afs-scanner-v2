@@ -458,6 +458,24 @@ const editFormEntries = computed(() => Object.entries(editForm));
 
 const canEditItem = (item: BatchItem) => !['queued', 'processing'].includes(item.status);
 
+const normalizeHeader = (header: string) =>
+    header.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
+const extractSecRegistrationYear = (rowData: Record<string, string>) => {
+    for (const [header, value] of Object.entries(rowData)) {
+        if (normalizeHeader(header) !== 'sec_registration_date') {
+            continue;
+        }
+
+        const match = value.match(/\b(\d{4})\b/);
+        if (match) {
+            return match[1];
+        }
+    }
+
+    return null;
+};
+
 const resetEditForm = () => {
     for (const key of Object.keys(editForm)) {
         delete editForm[key];
@@ -531,6 +549,12 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
         header: 'Company',
         enableSorting: false,
         cell: ({ row }) => row.original.company || '-',
+    },
+    {
+        id: 'sec_registration_year',
+        header: 'Year',
+        enableSorting: false,
+        cell: ({ row }) => extractSecRegistrationYear(row.original.row_data) ?? '-',
     },
     {
         id: 'status',
@@ -723,7 +747,7 @@ onBeforeUnmount(() => {
                             <CardTitle>Bulk Document Generator</CardTitle>
                             <CardDescription>
                                 Upload one Excel source, one default DOCX template, and optional year-threshold templates.
-                                Each row uses the year from `SEC REGISTRATION DATE` to choose the matching template.
+                                Each year rule applies from its year onward until the next higher rule takes over.
                             </CardDescription>
                         </div>
 
