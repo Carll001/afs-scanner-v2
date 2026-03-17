@@ -1,8 +1,9 @@
 import { createInertiaApp } from '@inertiajs/vue3';
 import { resolvePageComponent } from 'laravel-vite-plugin/inertia-helpers';
 import type { DefineComponent } from 'vue';
-import { createApp, h } from 'vue';
+import { createSSRApp, Fragment, h } from 'vue';
 import '../css/app.css';
+import AppToaster from '@/components/AppToaster.vue';
 import { initializeTheme } from '@/composables/useAppearance';
 
 const appName = import.meta.env.VITE_APP_NAME || 'Laravel';
@@ -15,7 +16,10 @@ createInertiaApp({
             import.meta.glob<DefineComponent>('./pages/**/*.vue'),
         ),
     setup({ el, App, props, plugin }) {
-        createApp({ render: () => h(App, props) })
+        createSSRApp({
+            render: () =>
+                h(Fragment, [h(App, props), h(AppToaster)]),
+        })
             .use(plugin)
             .mount(el);
     },

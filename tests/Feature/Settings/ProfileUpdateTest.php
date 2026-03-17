@@ -34,7 +34,13 @@ class ProfileUpdateTest extends TestCase
 
         $response
             ->assertSessionHasNoErrors()
-            ->assertRedirect(route('profile.edit'));
+            ->assertRedirect(route('profile.edit'))
+            ->assertSessionHas('toast', function (array $toast): bool {
+                return is_string($toast['id'] ?? null)
+                    && ($toast['type'] ?? null) === 'success'
+                    && ($toast['title'] ?? null) === 'Profile updated'
+                    && ($toast['message'] ?? null) === 'Your profile information has been saved.';
+            });
 
         $user->refresh();
 
@@ -56,7 +62,13 @@ class ProfileUpdateTest extends TestCase
 
         $response
             ->assertSessionHasNoErrors()
-            ->assertRedirect(route('profile.edit'));
+            ->assertRedirect(route('profile.edit'))
+            ->assertSessionHas('toast', function (array $toast): bool {
+                return is_string($toast['id'] ?? null)
+                    && ($toast['type'] ?? null) === 'success'
+                    && ($toast['title'] ?? null) === 'Profile updated'
+                    && ($toast['message'] ?? null) === 'Your profile information has been saved.';
+            });
 
         $this->assertNotNull($user->refresh()->email_verified_at);
     }

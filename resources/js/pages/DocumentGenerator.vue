@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { ColumnDef } from '@tanstack/vue-table';
 import { Head } from '@inertiajs/vue3';
+import type { ColumnDef } from '@tanstack/vue-table';
 import { computed, h, onBeforeUnmount, reactive, ref } from 'vue';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -19,6 +19,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Spinner } from '@/components/ui/spinner';
 import AppLayout from '@/layouts/AppLayout.vue';
+import { createToast, showToast } from '@/lib/toast';
 import documentGeneratorRoutes from '@/routes/document-generator';
 import type { BreadcrumbItem } from '@/types';
 
@@ -142,6 +143,10 @@ const batchPendingDelete = ref<HistoryBatch | null>(null);
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let companySearchDebounce: ReturnType<typeof setTimeout> | null = null;
+
+const showNotice = (type: 'success' | 'error', title: string, message: string) => {
+    showToast(createToast(type, title, message));
+};
 
 const csrfToken = () => {
     const xsrfCookie = document.cookie
@@ -317,8 +322,13 @@ const postBatch = async () => {
 
         await Promise.all([loadProgress(), loadBatchItems(1), loadActivityLogs(1), loadHistory(1)]);
         startPolling();
+        showNotice('success', 'Batch started', 'Document generation has started for the uploaded file.');
     } catch (error) {
-        createErrorMessage.value = error instanceof Error ? error.message : 'Unable to create batch.';
+        showNotice(
+            'error',
+            'Batch was not started',
+            error instanceof Error ? error.message : 'Unable to create batch.',
+        );
     } finally {
         creatingBatch.value = false;
     }
@@ -571,9 +581,14 @@ const confirmDeleteBatch = async () => {
                 ? historyData.value.current_page - 1
                 : historyData.value.current_page,
         );
+        showNotice('success', `Batch #${deletingBatchId} deleted`, 'The batch has been removed from history.');
         closeDeleteBatchDialog();
     } catch (error) {
-        createErrorMessage.value = error instanceof Error ? error.message : 'Unable to delete batch.';
+        showNotice(
+            'error',
+            'Batch was not deleted',
+            error instanceof Error ? error.message : 'Unable to delete batch.',
+        );
     } finally {
         batchDeleting.value = false;
     }

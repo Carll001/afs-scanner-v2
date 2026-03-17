@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/dialog';
 import { Spinner } from '@/components/ui/spinner';
 import AppLayout from '@/layouts/AppLayout.vue';
+import { createToast, showToast } from '@/lib/toast';
 import documentGeneratorRoutes from '@/routes/document-generator';
 import type { BreadcrumbItem } from '@/types';
 
@@ -36,6 +37,26 @@ const props = defineProps<{
 const deleteDialogOpen = ref(false);
 const deletingBatch = ref(false);
 
+const showNotice = (
+    type: 'success' | 'error',
+    title: string,
+    message: string,
+) => {
+    showToast(createToast(type, title, message));
+};
+
+const csrfToken = () => {
+    const xsrfCookie = document.cookie
+        .split('; ')
+        .find((value) => value.startsWith('XSRF-TOKEN='));
+
+    if (!xsrfCookie) {
+        return '';
+    }
+
+    return decodeURIComponent(xsrfCookie.split('=')[1] ?? '');
+};
+
 const confirmDeleteBatch = async () => {
     deletingBatch.value = true;
 
@@ -50,7 +71,7 @@ const confirmDeleteBatch = async () => {
                 headers: {
                     Accept: 'application/json',
                     'X-Requested-With': 'XMLHttpRequest',
-                    'X-XSRF-TOKEN': decodeURIComponent(document.cookie.split('; ').find((value) => value.startsWith('XSRF-TOKEN='))?.split('=')[1] ?? ''),
+                    'X-XSRF-TOKEN': csrfToken(),
                 },
             },
         );
@@ -59,7 +80,18 @@ const confirmDeleteBatch = async () => {
             throw new Error(`Request failed with status ${response.status}`);
         }
 
+        showNotice(
+            'success',
+            `Batch #${props.batch.id} deleted`,
+            'The batch has been removed from generated files.',
+        );
         router.visit('/generated-files');
+    } catch (error) {
+        showNotice(
+            'error',
+            'Batch was not deleted',
+            error instanceof Error ? error.message : 'Unable to delete batch.',
+        );
     } finally {
         deletingBatch.value = false;
     }

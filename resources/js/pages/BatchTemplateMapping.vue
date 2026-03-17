@@ -1,11 +1,6 @@
 <script setup lang="ts">
 import { Head, Link } from '@inertiajs/vue3';
 import { computed, reactive, ref } from 'vue';
-import {
-    Alert,
-    AlertDescription,
-    AlertTitle,
-} from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
     Card,
@@ -18,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Spinner } from '@/components/ui/spinner';
 import AppLayout from '@/layouts/AppLayout.vue';
+import { createToast, showToast } from '@/lib/toast';
 import documentGeneratorRoutes from '@/routes/document-generator';
 import type { BreadcrumbItem } from '@/types';
 
@@ -68,11 +64,6 @@ const breadcrumbs: BreadcrumbItem[] = [
 ];
 
 const mapping = ref<BatchTemplateMapping>(props.batch);
-const notice = ref<{
-    variant: 'default' | 'destructive';
-    title: string;
-    message: string;
-} | null>(null);
 
 const defaultTemplateFile = ref<File | null>(null);
 const defaultTemplateErrors = ref<Record<string, string[]>>({});
@@ -118,12 +109,8 @@ const csrfToken = () => {
     return decodeURIComponent(xsrfCookie.split('=')[1] ?? '');
 };
 
-const showNotice = (
-    variant: 'default' | 'destructive',
-    title: string,
-    message: string,
-) => {
-    notice.value = { variant, title, message };
+const showNotice = (type: 'success' | 'error', title: string, message: string) => {
+    showToast(createToast(type, title, message));
 };
 
 const applyMapping = (payload: BatchTemplateMapping) => {
@@ -262,7 +249,7 @@ const updateDefaultTemplate = async () => {
         );
 
         applyMapping(payload);
-        showNotice('default', 'Default template updated', 'The batch now uses the new default DOCX template.');
+        showNotice('success', 'Default template updated', 'The batch now uses the new default DOCX template.');
     } catch (error) {
         if (error instanceof Error && 'validationErrors' in error) {
             defaultTemplateErrors.value =
@@ -274,7 +261,7 @@ const updateDefaultTemplate = async () => {
         }
 
         showNotice(
-            'destructive',
+            'error',
             'Default template was not updated',
             error instanceof Error ? error.message : 'Unable to update the default template.',
         );
@@ -314,7 +301,7 @@ const createYearTemplate = async () => {
         );
 
         applyMapping(payload);
-        showNotice('default', 'Year template added', 'The new year rule has been saved.');
+        showNotice('success', 'Year template added', 'The new year rule has been saved.');
     } catch (error) {
         if (error instanceof Error && 'validationErrors' in error) {
             newTemplate.errors =
@@ -326,7 +313,7 @@ const createYearTemplate = async () => {
         }
 
         showNotice(
-            'destructive',
+            'error',
             'Year template was not added',
             error instanceof Error ? error.message : 'Unable to add the year template.',
         );
@@ -368,7 +355,7 @@ const updateYearTemplate = async (template: EditableYearTemplate) => {
         );
 
         applyMapping(payload);
-        showNotice('default', 'Year template updated', 'The selected year rule has been updated.');
+        showNotice('success', 'Year template updated', 'The selected year rule has been updated.');
     } catch (error) {
         if (error instanceof Error && 'validationErrors' in error) {
             template.errors =
@@ -380,7 +367,7 @@ const updateYearTemplate = async (template: EditableYearTemplate) => {
         }
 
         showNotice(
-            'destructive',
+            'error',
             'Year template was not updated',
             error instanceof Error ? error.message : 'Unable to update the year template.',
         );
@@ -398,10 +385,10 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
         );
 
         applyMapping(payload);
-        showNotice('default', 'Year template removed', 'The selected year rule has been removed.');
+        showNotice('success', 'Year template removed', 'The selected year rule has been removed.');
     } catch (error) {
         showNotice(
-            'destructive',
+            'error',
             'Year template was not removed',
             error instanceof Error ? error.message : 'Unable to remove the year template.',
         );
@@ -443,11 +430,6 @@ const onExistingTemplateFileChange = (template: EditableYearTemplate, event: Eve
                     <Link :href="documentGeneratorRoutes.index()">Back to Document Generator</Link>
                 </Button>
             </div>
-
-            <Alert v-if="notice" :variant="notice.variant">
-                <AlertTitle>{{ notice.title }}</AlertTitle>
-                <AlertDescription>{{ notice.message }}</AlertDescription>
-            </Alert>
 
             <Card>
                 <CardHeader>
@@ -575,7 +557,7 @@ const onExistingTemplateFileChange = (template: EditableYearTemplate, event: Eve
                                     :id="`template-file-${template.id}`"
                                     type="file"
                                     accept=".docx"
-                                    @change="(event) => onExistingTemplateFileChange(template, event)"
+                                    @change="onExistingTemplateFileChange(template, $event)"
                                 />
                                 <p class="text-xs text-muted-foreground">
                                     Leave this empty if you only want to change the year.

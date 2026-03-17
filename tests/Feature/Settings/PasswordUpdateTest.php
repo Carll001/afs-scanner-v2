@@ -37,7 +37,13 @@ class PasswordUpdateTest extends TestCase
 
         $response
             ->assertSessionHasNoErrors()
-            ->assertRedirect(route('user-password.edit'));
+            ->assertRedirect(route('user-password.edit'))
+            ->assertSessionHas('toast', function (array $toast): bool {
+                return is_string($toast['id'] ?? null)
+                    && ($toast['type'] ?? null) === 'success'
+                    && ($toast['title'] ?? null) === 'Password updated'
+                    && ($toast['message'] ?? null) === 'Your password has been changed.';
+            });
 
         $this->assertTrue(Hash::check('new-password', $user->refresh()->password));
     }

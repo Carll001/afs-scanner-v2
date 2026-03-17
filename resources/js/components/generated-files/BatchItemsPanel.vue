@@ -1,21 +1,14 @@
 <script setup lang="ts">
 import type { ColumnDef } from '@tanstack/vue-table';
 import {
-    CheckCircle2,
     Eye,
     FileText,
     Loader2,
     MoreVertical,
     Pencil,
     Printer,
-    TriangleAlert,
 } from 'lucide-vue-next';
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
-import {
-    Alert,
-    AlertDescription,
-    AlertTitle,
-} from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -49,6 +42,7 @@ import {
     SelectTrigger,
     SelectValue,
 } from '@/components/ui/select';
+import { createToast, showToast } from '@/lib/toast';
 import documentGeneratorRoutes from '@/routes/document-generator';
 
 type SortDirection = 'asc' | 'desc';
@@ -144,17 +138,11 @@ const deleteItemDialogOpen = ref(false);
 const deletingItem = ref(false);
 const pendingDeleteItem = ref<BatchItem | null>(null);
 const regeneratingItemIds = ref<number[]>([]);
-const inlineNotice = ref<{
-    variant: 'default' | 'destructive';
-    title: string;
-    message: string;
-} | null>(null);
 
 let companySearchDebounce: ReturnType<typeof setTimeout> | null = null;
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let printFrame: HTMLIFrameElement | null = null;
 let printCleanupTimeout: ReturnType<typeof setTimeout> | null = null;
-let inlineNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
 
 const csrfToken = () => {
     const xsrfCookie = document.cookie
@@ -351,25 +339,8 @@ const stopPolling = () => {
     }
 };
 
-const showInlineNotice = (
-    variant: 'default' | 'destructive',
-    title: string,
-    message: string,
-) => {
-    inlineNotice.value = {
-        variant,
-        title,
-        message,
-    };
-
-    if (inlineNoticeTimeout) {
-        clearTimeout(inlineNoticeTimeout);
-    }
-
-    inlineNoticeTimeout = setTimeout(() => {
-        inlineNotice.value = null;
-        inlineNoticeTimeout = null;
-    }, 5000);
+const showNotice = (type: 'success' | 'error', title: string, message: string) => {
+    showToast(createToast(type, title, message));
 };
 
 const reconcileRegeneratingItems = (items: BatchItem[]) => {
@@ -381,8 +352,8 @@ const reconcileRegeneratingItems = (items: BatchItem[]) => {
         }
 
         if (item.status === 'failed') {
-            showInlineNotice(
-                'destructive',
+            showNotice(
+                'error',
                 `Row ${item.row_number} regeneration failed`,
                 item.error_message ?? 'Please review the row and try again.',
             );
@@ -390,8 +361,8 @@ const reconcileRegeneratingItems = (items: BatchItem[]) => {
         }
 
         if (item.status === 'pdf_done') {
-            showInlineNotice(
-                'default',
+            showNotice(
+                'success',
                 `Row ${item.row_number} regeneration completed`,
                 'The updated files are ready to use.',
             );
@@ -512,8 +483,8 @@ const saveEditedItem = async () => {
         }
 
         optimisticQueueItem(itemId, queuedRowData);
-        showInlineNotice(
-            'default',
+        showNotice(
+            'success',
             `Row ${rowNumber} saved`,
             'Regeneration started. Updated files will appear automatically.',
         );
@@ -537,8 +508,8 @@ const saveEditedItem = async () => {
         editErrorMessage.value =
             error instanceof Error ? error.message : 'Unable to update row.';
 
-        showInlineNotice(
-            'destructive',
+        showNotice(
+            'error',
             `Row ${rowNumber} was not updated`,
             error instanceof Error ? error.message : 'Unable to update row.',
         );
@@ -573,15 +544,15 @@ const confirmDeleteItem = async () => {
             loadBatchProgress(),
         ]);
 
-        showInlineNotice(
-            'default',
+        showNotice(
+            'success',
             `Row ${pendingDeleteItem.value.row_number} deleted`,
             'The row has been hidden from this batch.',
         );
         closeDeleteItemDialog();
     } catch (error) {
-        showInlineNotice(
-            'destructive',
+        showNotice(
+            'error',
             'Row was not deleted',
             error instanceof Error ? error.message : 'Unable to delete row.',
         );
@@ -941,10 +912,6 @@ onBeforeUnmount(() => {
     stopPolling();
     cleanupPrintFrame();
 
-    if (inlineNoticeTimeout) {
-        clearTimeout(inlineNoticeTimeout);
-    }
-
     if (companySearchDebounce) {
         clearTimeout(companySearchDebounce);
     }
@@ -960,18 +927,6 @@ onBeforeUnmount(() => {
             </CardDescription>
         </CardHeader>
         <CardContent class="space-y-4">
-            <Alert v-if="inlineNotice" :variant="inlineNotice.variant">
-                <CheckCircle2
-                    v-if="inlineNotice.variant === 'default'"
-                    class="size-4"
-                />
-                <TriangleAlert v-else class="size-4" />
-                <AlertTitle>{{ inlineNotice.title }}</AlertTitle>
-                <AlertDescription>
-                    {{ inlineNotice.message }}
-                </AlertDescription>
-            </Alert>
-
             <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
                 <div
                     v-for="stat in summaryStats"

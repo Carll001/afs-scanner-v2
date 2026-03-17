@@ -29,6 +29,7 @@ import {
     ChevronRight,
     Loader2,
 } from 'lucide-vue-next';
+import { createToast, showToast } from '@/lib/toast';
 
 type HistoryBatch = {
     id: number;
@@ -61,6 +62,26 @@ const deleteDialogOpen = ref(false);
 const deletingBatch = ref(false);
 const pendingDeleteBatch = ref<HistoryBatch | null>(null);
 
+const showNotice = (
+    type: 'success' | 'error',
+    title: string,
+    message: string,
+) => {
+    showToast(createToast(type, title, message));
+};
+
+const csrfToken = () => {
+    const xsrfCookie = document.cookie
+        .split('; ')
+        .find((value) => value.startsWith('XSRF-TOKEN='));
+
+    if (!xsrfCookie) {
+        return '';
+    }
+
+    return decodeURIComponent(xsrfCookie.split('=')[1] ?? '');
+};
+
 const getApi = async <T,>(url: string): Promise<T> => {
     const response = await fetch(url, {
         method: 'GET',
@@ -83,7 +104,7 @@ const sendDelete = async (url: string): Promise<void> => {
         headers: {
             Accept: 'application/json',
             'X-Requested-With': 'XMLHttpRequest',
-            'X-XSRF-TOKEN': decodeURIComponent(document.cookie.split('; ').find((value) => value.startsWith('XSRF-TOKEN='))?.split('=')[1] ?? ''),
+            'X-XSRF-TOKEN': csrfToken(),
         },
     });
 
@@ -152,7 +173,18 @@ const confirmDeleteBatch = async () => {
                 ? historyData.value.current_page - 1
                 : historyData.value.current_page,
         );
+        showNotice(
+            'success',
+            `Batch #${pendingDeleteBatch.value.id} deleted`,
+            'The batch has been removed from generated files.',
+        );
         closeDeleteDialog();
+    } catch (error) {
+        showNotice(
+            'error',
+            'Batch was not deleted',
+            error instanceof Error ? error.message : 'Unable to delete batch.',
+        );
     } finally {
         deletingBatch.value = false;
     }

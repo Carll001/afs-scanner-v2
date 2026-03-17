@@ -1,11 +1,6 @@
 <script setup lang="ts">
 import { Head, Link } from '@inertiajs/vue3';
 import { computed, reactive, ref } from 'vue';
-import {
-    Alert,
-    AlertDescription,
-    AlertTitle,
-} from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
     Card,
@@ -18,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Spinner } from '@/components/ui/spinner';
 import AppLayout from '@/layouts/AppLayout.vue';
+import { createToast, showToast } from '@/lib/toast';
 import documentGeneratorRoutes from '@/routes/document-generator';
 import type { BreadcrumbItem } from '@/types';
 
@@ -58,11 +54,6 @@ const breadcrumbs: BreadcrumbItem[] = [
 ];
 
 const mapping = ref<TemplateMappingPayload>(props.mapping);
-const notice = ref<{
-    variant: 'default' | 'destructive';
-    title: string;
-    message: string;
-} | null>(null);
 
 const defaultTemplateFile = ref<File | null>(null);
 const defaultTemplateErrors = ref<Record<string, string[]>>({});
@@ -128,8 +119,8 @@ const applyMapping = (payload: TemplateMappingPayload) => {
     newTemplate.errors = {};
 };
 
-const showNotice = (variant: 'default' | 'destructive', title: string, message: string) => {
-    notice.value = { variant, title, message };
+const showNotice = (type: 'success' | 'error', title: string, message: string) => {
+    showToast(createToast(type, title, message));
 };
 
 const parseValidationError = async (response: Response) => {
@@ -252,12 +243,12 @@ const updateDefaultTemplate = async () => {
         const formData = new FormData();
         formData.append('template_file', defaultTemplateFile.value);
         applyMapping(await sendForm('/document-generator/templates/default', formData));
-        showNotice('default', 'Default template updated', 'Future batches will use the new default template.');
+        showNotice('success', 'Default template updated', 'Future batches will use the new default template.');
     } catch (error) {
         if (error instanceof Error && 'validationErrors' in error) {
             defaultTemplateErrors.value = (error as Error & { validationErrors?: Record<string, string[]> }).validationErrors ?? {};
         }
-        showNotice('destructive', 'Default template was not updated', error instanceof Error ? error.message : 'Unable to update the default template.');
+        showNotice('error', 'Default template was not updated', error instanceof Error ? error.message : 'Unable to update the default template.');
     } finally {
         defaultTemplateSaving.value = false;
     }
@@ -289,12 +280,12 @@ const createYearTemplate = async () => {
         formData.append('year', normalizedYear);
         formData.append('template_file', newTemplate.file);
         applyMapping(await sendForm('/document-generator/templates', formData));
-        showNotice('default', 'Year template added', 'Future batches will use the new year rule.');
+        showNotice('success', 'Year template added', 'Future batches will use the new year rule.');
     } catch (error) {
         if (error instanceof Error && 'validationErrors' in error) {
             newTemplate.errors = (error as Error & { validationErrors?: Record<string, string[]> }).validationErrors ?? {};
         }
-        showNotice('destructive', 'Year template was not added', error instanceof Error ? error.message : 'Unable to add the year template.');
+        showNotice('error', 'Year template was not added', error instanceof Error ? error.message : 'Unable to add the year template.');
     } finally {
         newTemplate.saving = false;
     }
@@ -324,12 +315,12 @@ const updateYearTemplate = async (template: EditableYearTemplate) => {
         }
 
         applyMapping(await sendForm(`/document-generator/templates/${template.id}/update`, formData));
-        showNotice('default', 'Year template updated', 'The template mapping has been updated.');
+        showNotice('success', 'Year template updated', 'The template mapping has been updated.');
     } catch (error) {
         if (error instanceof Error && 'validationErrors' in error) {
             template.errors = (error as Error & { validationErrors?: Record<string, string[]> }).validationErrors ?? {};
         }
-        showNotice('destructive', 'Year template was not updated', error instanceof Error ? error.message : 'Unable to update the year template.');
+        showNotice('error', 'Year template was not updated', error instanceof Error ? error.message : 'Unable to update the year template.');
     } finally {
         template.saving = false;
     }
@@ -340,9 +331,9 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
 
     try {
         applyMapping(await sendDelete(`/document-generator/templates/${template.id}`));
-        showNotice('default', 'Year template removed', 'The year rule has been removed.');
+        showNotice('success', 'Year template removed', 'The year rule has been removed.');
     } catch (error) {
-        showNotice('destructive', 'Year template was not removed', error instanceof Error ? error.message : 'Unable to remove the year template.');
+        showNotice('error', 'Year template was not removed', error instanceof Error ? error.message : 'Unable to remove the year template.');
     } finally {
         template.deleting = false;
     }
@@ -366,11 +357,6 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
                     <Link :href="documentGeneratorRoutes.index()">Back to Document Generator</Link>
                 </Button>
             </div>
-
-            <Alert v-if="notice" :variant="notice.variant">
-                <AlertTitle>{{ notice.title }}</AlertTitle>
-                <AlertDescription>{{ notice.message }}</AlertDescription>
-            </Alert>
 
             <Card>
                 <CardHeader>
@@ -468,7 +454,7 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
 
                             <div class="grid gap-2">
                                 <Label :for="`template-file-${template.id}`">Replace DOCX</Label>
-                                <Input :id="`template-file-${template.id}`" type="file" accept=".docx" @change="(event) => onExistingTemplateFileChange(template, event)" />
+                                <Input :id="`template-file-${template.id}`" type="file" accept=".docx" @change="onExistingTemplateFileChange(template, $event)" />
                                 <p class="text-xs text-muted-foreground">Leave empty if you only want to change the year.</p>
                                 <p v-if="template.errors.template_file" class="text-sm text-destructive">{{ template.errors.template_file[0] }}</p>
                             </div>
