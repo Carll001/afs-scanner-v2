@@ -6,11 +6,12 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class DocumentBatch extends Model
 {
     /** @use HasFactory<\Database\Factories\DocumentBatchFactory> */
-    use HasFactory;
+    use HasFactory, SoftDeletes;
 
     /**
      * @var list<string>
@@ -41,6 +42,7 @@ class DocumentBatch extends Model
             'headers_json' => 'array',
             'started_at' => 'datetime',
             'completed_at' => 'datetime',
+            'deleted_at' => 'datetime',
         ];
     }
 

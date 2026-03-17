@@ -38,12 +38,16 @@ Route::middleware(['auth', 'verified'])->group(function () {
         ->name('document-generator.batches.template-mapping');
     Route::get('document-generator/batches/{batch}/progress', [DocumentGeneratorController::class, 'progress'])
         ->name('document-generator.batches.progress');
+    Route::delete('document-generator/batches/{batch}', [DocumentGeneratorController::class, 'destroyBatch'])
+        ->name('document-generator.batches.destroy');
     Route::get('document-generator/batches/{batch}/items', [DocumentGeneratorController::class, 'items'])
         ->name('document-generator.batches.items');
     Route::get('document-generator/batches/{batch}/items/{item}', [DocumentGeneratorController::class, 'showItem'])
         ->name('document-generator.batches.items.show');
     Route::put('document-generator/batches/{batch}/items/{item}', [DocumentGeneratorController::class, 'updateItem'])
         ->name('document-generator.batches.items.update');
+    Route::delete('document-generator/batches/{batch}/items/{item}', [DocumentGeneratorController::class, 'destroyItem'])
+        ->name('document-generator.batches.items.destroy');
     Route::get('document-generator/batches/{batch}/items/{item}/{type}', [DocumentGeneratorController::class, 'download'])
         ->name('document-generator.batches.items.download');
     Route::get('document-generator/batches/{batch}/logs', [DocumentGeneratorController::class, 'logs'])

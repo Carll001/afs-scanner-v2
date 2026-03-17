@@ -140,6 +140,9 @@ const editErrorMessage = ref<string | null>(null);
 const editErrors = ref<Record<string, string[]>>({});
 const editingItem = ref<BatchItem | null>(null);
 const editForm = reactive<Record<string, string>>({});
+const deleteItemDialogOpen = ref(false);
+const deletingItem = ref(false);
+const pendingDeleteItem = ref<BatchItem | null>(null);
 const regeneratingItemIds = ref<number[]>([]);
 const inlineNotice = ref<{
     variant: 'default' | 'destructive';
@@ -218,6 +221,22 @@ const sendJson = async <T,>(
     }
 
     return (await response.json()) as T;
+};
+
+const sendDelete = async (url: string): Promise<void> => {
+    const response = await fetch(url, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: {
+            Accept: 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-XSRF-TOKEN': csrfToken(),
+        },
+    });
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+    }
 };
 
 const loadBatchProgress = async () => {
@@ -311,6 +330,16 @@ const closeEditDialog = () => {
     editErrorMessage.value = null;
     editErrors.value = {};
     resetEditForm();
+};
+
+const openDeleteItemDialog = (item: BatchItem) => {
+    pendingDeleteItem.value = item;
+    deleteItemDialogOpen.value = true;
+};
+
+const closeDeleteItemDialog = () => {
+    deleteItemDialogOpen.value = false;
+    pendingDeleteItem.value = null;
 };
 
 const stopPolling = () => {
@@ -515,6 +544,49 @@ const saveEditedItem = async () => {
         );
     } finally {
         editSubmitting.value = false;
+    }
+};
+
+const confirmDeleteItem = async () => {
+    if (!pendingDeleteItem.value) {
+        return;
+    }
+
+    deletingItem.value = true;
+
+    try {
+        await sendDelete(
+            documentGeneratorRoutes.batches.items.destroy.url({
+                batch: props.batch.id,
+                item: pendingDeleteItem.value.id,
+            }),
+        );
+
+        regeneratingItemIds.value = regeneratingItemIds.value.filter((id) => id !== pendingDeleteItem.value?.id);
+
+        await Promise.all([
+            loadBatchItems(
+                itemsData.value.current_page > 1 && itemsData.value.data.length === 1
+                    ? itemsData.value.current_page - 1
+                    : itemsData.value.current_page,
+            ),
+            loadBatchProgress(),
+        ]);
+
+        showInlineNotice(
+            'default',
+            `Row ${pendingDeleteItem.value.row_number} deleted`,
+            'The row has been hidden from this batch.',
+        );
+        closeDeleteItemDialog();
+    } catch (error) {
+        showInlineNotice(
+            'destructive',
+            'Row was not deleted',
+            error instanceof Error ? error.message : 'Unable to delete row.',
+        );
+    } finally {
+        deletingItem.value = false;
     }
 };
 
@@ -830,6 +902,26 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
                                                       ],
                                                   },
                                               ),
+                                        h(
+                                            DropdownMenuItem,
+                                            {
+                                                disabled: isItemRegenerating(item.id),
+                                                onSelect: (event: Event) => {
+                                                    event.preventDefault();
+
+                                                    if (isItemRegenerating(item.id)) {
+                                                        return;
+                                                    }
+
+                                                    openDeleteItemDialog(item);
+                                                },
+                                            },
+                                            {
+                                                default: () => [
+                                                    h('span', { class: 'text-destructive' }, 'Delete row'),
+                                                ],
+                                            },
+                                        ),
                                     ],
                                 },
                             ),
@@ -1012,6 +1104,36 @@ onBeforeUnmount(() => {
                 <Button :disabled="editSubmitting" @click="saveEditedItem">
                     <Spinner v-if="editSubmitting" class="size-4" />
                     Save and Regenerate
+                </Button>
+            </DialogFooter>
+        </DialogContent>
+    </Dialog>
+
+    <Dialog
+        :open="deleteItemDialogOpen"
+        @update:open="
+            (open) => {
+                if (!open) closeDeleteItemDialog();
+            }
+        "
+    >
+        <DialogContent>
+            <DialogHeader>
+                <DialogTitle>
+                    Delete Row {{ pendingDeleteItem?.row_number ?? '-' }}?
+                </DialogTitle>
+                <DialogDescription>
+                    This row and its outputs will be hidden from the batch. Stored files will remain on disk for now.
+                </DialogDescription>
+            </DialogHeader>
+
+            <DialogFooter>
+                <Button variant="outline" @click="closeDeleteItemDialog">
+                    Cancel
+                </Button>
+                <Button variant="destructive" :disabled="deletingItem" @click="confirmDeleteItem">
+                    <Spinner v-if="deletingItem" class="size-4" />
+                    Delete row
                 </Button>
             </DialogFooter>
         </DialogContent>

@@ -58,6 +58,8 @@ class DocumentGeneratorController extends Controller
 
     public function generatedFilesBatch(Request $request, DocumentBatch $batch): Response
     {
+        $this->assertBatchOwnership($request, $batch);
+
         return Inertia::render('GeneratedBatchItems', [
             'batch' => $this->historyBatchPayload($batch),
         ]);
@@ -164,11 +166,15 @@ class DocumentGeneratorController extends Controller
 
     public function progress(Request $request, DocumentBatch $batch): JsonResponse
     {
+        $this->assertBatchOwnership($request, $batch);
+
         return response()->json($this->batchProgressPayload($batch));
     }
 
     public function items(Request $request, DocumentBatch $batch): JsonResponse
     {
+        $this->assertBatchOwnership($request, $batch);
+
         $validated = $request->validate([
             'per_page' => ['nullable', 'integer', 'min:5', 'max:100'],
             'sort_by' => ['nullable', 'in:row_number,status,created_at,updated_at'],
@@ -227,6 +233,7 @@ class DocumentGeneratorController extends Controller
         DocumentBatchItem $item,
         string $type
     ): StreamedResponse|BinaryFileResponse {
+        $this->assertBatchOwnership($request, $batch);
         $this->assertItemBelongsToBatch($batch, $item);
 
         if (! in_array($type, ['docx', 'pdf'], true)) {
@@ -248,8 +255,9 @@ class DocumentGeneratorController extends Controller
         return Storage::disk('local')->download($path, "batch-{$batch->id}-row-{$item->row_number}.docx");
     }
 
-    public function showItem(DocumentBatch $batch, DocumentBatchItem $item): JsonResponse
+    public function showItem(Request $request, DocumentBatch $batch, DocumentBatchItem $item): JsonResponse
     {
+        $this->assertBatchOwnership($request, $batch);
         $this->assertItemBelongsToBatch($batch, $item);
 
         return response()->json($this->batchItemPayload($item));
@@ -261,6 +269,7 @@ class DocumentGeneratorController extends Controller
         DocumentBatchItem $item,
         DocumentBatchActivityLogger $activityLogger
     ): JsonResponse {
+        $this->assertBatchOwnership($request, $batch);
         $this->assertItemBelongsToBatch($batch, $item);
 
         $validated = $request->validate([
@@ -371,6 +380,8 @@ class DocumentGeneratorController extends Controller
 
     public function logs(Request $request, DocumentBatch $batch): JsonResponse
     {
+        $this->assertBatchOwnership($request, $batch);
+
         if (! Schema::hasTable('document_batch_item_activity_logs')) {
             return response()->json([
                 'current_page' => 1,
@@ -408,6 +419,43 @@ class DocumentGeneratorController extends Controller
             });
 
         return response()->json($logs);
+    }
+
+    public function destroyBatch(Request $request, DocumentBatch $batch): JsonResponse
+    {
+        $this->assertBatchOwnership($request, $batch);
+
+        DB::transaction(function () use ($batch): void {
+            $lockedBatch = DocumentBatch::query()->lockForUpdate()->findOrFail($batch->id);
+
+            DocumentBatchItem::query()
+                ->where('document_batch_id', $lockedBatch->id)
+                ->delete();
+
+            $lockedBatch->delete();
+        });
+
+        return response()->json([
+            'message' => 'Batch deleted.',
+        ]);
+    }
+
+    public function destroyItem(Request $request, DocumentBatch $batch, DocumentBatchItem $item): JsonResponse
+    {
+        $this->assertBatchOwnership($request, $batch);
+        $this->assertItemBelongsToBatch($batch, $item);
+
+        DB::transaction(function () use ($batch, $item): void {
+            $lockedBatch = DocumentBatch::query()->lockForUpdate()->findOrFail($batch->id);
+            $lockedItem = DocumentBatchItem::query()->lockForUpdate()->findOrFail($item->id);
+
+            $lockedItem->delete();
+            $this->recalculateBatchState($lockedBatch);
+        });
+
+        return response()->json([
+            'message' => 'Batch item deleted.',
+        ]);
     }
 
     public function updateGlobalDefaultTemplate(Request $request): JsonResponse
@@ -808,6 +856,57 @@ class DocumentGeneratorController extends Controller
     private static function normalizeCompanyKey(string $key): string
     {
         return preg_replace('/[^a-z0-9]+/', '', mb_strtolower($key)) ?? '';
+    }
+
+    private function recalculateBatchState(DocumentBatch $batch): void
+    {
+        $counts = DocumentBatchItem::query()
+            ->where('document_batch_id', $batch->id)
+            ->selectRaw('COUNT(*) as total_items')
+            ->selectRaw('SUM(CASE WHEN completed_at IS NOT NULL THEN 1 ELSE 0 END) as processed_items')
+            ->selectRaw("SUM(CASE WHEN status = 'pdf_done' THEN 1 ELSE 0 END) as success_items")
+            ->selectRaw("SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_items")
+            ->first();
+
+        $totalItems = (int) ($counts?->total_items ?? 0);
+        $processedItems = (int) ($counts?->processed_items ?? 0);
+        $successItems = (int) ($counts?->success_items ?? 0);
+        $failedItems = (int) ($counts?->failed_items ?? 0);
+
+        $batch->total_items = $totalItems;
+        $batch->processed_items = $processedItems;
+        $batch->success_items = $successItems;
+        $batch->failed_items = $failedItems;
+
+        if ($totalItems === 0) {
+            $batch->status = 'completed';
+            $batch->started_at = null;
+            $batch->completed_at = now();
+            $batch->save();
+
+            return;
+        }
+
+        if ($processedItems === 0) {
+            $batch->status = 'queued';
+            $batch->started_at = null;
+            $batch->completed_at = null;
+            $batch->save();
+
+            return;
+        }
+
+        if ($processedItems < $totalItems) {
+            $batch->status = 'processing';
+            $batch->completed_at = null;
+            $batch->save();
+
+            return;
+        }
+
+        $batch->status = $failedItems > 0 && $successItems === 0 ? 'failed' : 'completed';
+        $batch->completed_at = $batch->completed_at ?? now();
+        $batch->save();
     }
 
     /**

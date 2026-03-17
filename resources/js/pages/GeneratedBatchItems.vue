@@ -1,8 +1,19 @@
 <script setup lang="ts">
-import { Head, Link } from '@inertiajs/vue3';
+import { Head, Link, router } from '@inertiajs/vue3';
+import { ref } from 'vue';
 import BatchItemsPanel from '@/components/generated-files/BatchItemsPanel.vue';
 import { Button } from '@/components/ui/button';
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
+import { Spinner } from '@/components/ui/spinner';
 import AppLayout from '@/layouts/AppLayout.vue';
+import documentGeneratorRoutes from '@/routes/document-generator';
 import type { BreadcrumbItem } from '@/types';
 
 type BatchSummary = {
@@ -22,6 +33,38 @@ const props = defineProps<{
     batch: BatchSummary;
 }>();
 
+const deleteDialogOpen = ref(false);
+const deletingBatch = ref(false);
+
+const confirmDeleteBatch = async () => {
+    deletingBatch.value = true;
+
+    try {
+        const response = await fetch(
+            documentGeneratorRoutes.batches.destroy.url({
+                batch: props.batch.id,
+            }),
+            {
+                method: 'DELETE',
+                credentials: 'same-origin',
+                headers: {
+                    Accept: 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-XSRF-TOKEN': decodeURIComponent(document.cookie.split('; ').find((value) => value.startsWith('XSRF-TOKEN='))?.split('=')[1] ?? ''),
+                },
+            },
+        );
+
+        if (!response.ok) {
+            throw new Error(`Request failed with status ${response.status}`);
+        }
+
+        router.visit('/generated-files');
+    } finally {
+        deletingBatch.value = false;
+    }
+};
+
 const breadcrumbs: BreadcrumbItem[] = [
     {
         title: 'Generated Files',
@@ -39,11 +82,35 @@ const breadcrumbs: BreadcrumbItem[] = [
 
     <AppLayout :breadcrumbs="breadcrumbs">
         <div class="space-y-6 p-4">
-            <Button variant="outline" as-child>
-                <Link href="/generated-files">Back to Batch Folders</Link>
-            </Button>
+            <div class="flex flex-wrap items-center gap-3">
+                <Button variant="outline" as-child>
+                    <Link href="/generated-files">Back to Batch Folders</Link>
+                </Button>
+                <Button variant="destructive" @click="deleteDialogOpen = true">
+                    Delete Batch
+                </Button>
+            </div>
 
             <BatchItemsPanel :batch="batch" />
         </div>
     </AppLayout>
+
+    <Dialog :open="deleteDialogOpen" @update:open="(open) => { deleteDialogOpen = open; }">
+        <DialogContent>
+            <DialogHeader>
+                <DialogTitle>Delete Batch #{{ batch.id }}?</DialogTitle>
+                <DialogDescription>
+                    This batch will be hidden from generated files and history. Stored files will remain on disk for now.
+                </DialogDescription>
+            </DialogHeader>
+
+            <DialogFooter>
+                <Button variant="outline" @click="deleteDialogOpen = false">Cancel</Button>
+                <Button variant="destructive" :disabled="deletingBatch" @click="confirmDeleteBatch">
+                    <Spinner v-if="deletingBatch" class="size-4" />
+                    Delete batch
+                </Button>
+            </DialogFooter>
+        </DialogContent>
+    </Dialog>
 </template>

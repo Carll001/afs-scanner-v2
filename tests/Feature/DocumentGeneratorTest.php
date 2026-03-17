@@ -1229,6 +1229,110 @@ class DocumentGeneratorTest extends TestCase
         $this->assertStringContainsString('Invalid SEC REGISTRATION DATE', (string) $item->error_message);
     }
 
+    public function test_owner_can_soft_delete_a_batch_and_its_items(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $batch = DocumentBatch::factory()->for($user)->create();
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+        ]);
+
+        $this->deleteJson(route('document-generator.batches.destroy', $batch))
+            ->assertOk()
+            ->assertJsonPath('message', 'Batch deleted.');
+
+        $this->assertSoftDeleted('document_batches', ['id' => $batch->id]);
+        $this->assertSoftDeleted('document_batch_items', ['id' => $item->id]);
+
+        $this->getJson(route('document-generator.batches.history'))
+            ->assertOk()
+            ->assertJsonMissing(['id' => $batch->id]);
+    }
+
+    public function test_owner_can_soft_delete_a_batch_item_and_batch_totals_are_recalculated(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $batch = DocumentBatch::factory()->for($user)->create([
+            'total_items' => 2,
+            'processed_items' => 2,
+            'success_items' => 1,
+            'failed_items' => 1,
+            'status' => 'completed',
+            'completed_at' => now(),
+        ]);
+
+        $deletedItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'pdf_done',
+            'completed_at' => now(),
+        ]);
+        DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'failed',
+            'completed_at' => now(),
+        ]);
+
+        $this->deleteJson(route('document-generator.batches.items.destroy', [$batch, $deletedItem]))
+            ->assertOk()
+            ->assertJsonPath('message', 'Batch item deleted.');
+
+        $this->assertSoftDeleted('document_batch_items', ['id' => $deletedItem->id]);
+
+        $batch->refresh();
+        $this->assertSame(1, $batch->total_items);
+        $this->assertSame(1, $batch->processed_items);
+        $this->assertSame(0, $batch->success_items);
+        $this->assertSame(1, $batch->failed_items);
+        $this->assertSame('failed', $batch->status);
+
+        $this->getJson(route('document-generator.batches.items', $batch))
+            ->assertOk()
+            ->assertJsonMissing(['id' => $deletedItem->id]);
+    }
+
+    public function test_user_cannot_delete_another_users_batch_or_item(): void
+    {
+        $owner = User::factory()->create();
+        $intruder = User::factory()->create();
+
+        $batch = DocumentBatch::factory()->for($owner)->create();
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+        ]);
+
+        $this->actingAs($intruder)
+            ->deleteJson(route('document-generator.batches.destroy', $batch))
+            ->assertNotFound();
+
+        $this->actingAs($intruder)
+            ->deleteJson(route('document-generator.batches.items.destroy', [$batch, $item]))
+            ->assertNotFound();
+    }
+
+    public function test_deleting_an_already_deleted_batch_or_item_returns_not_found(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $batch = DocumentBatch::factory()->for($user)->create();
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+        ]);
+
+        $item->delete();
+        $batch->delete();
+
+        $this->deleteJson(route('document-generator.batches.destroy', $batch->id))
+            ->assertNotFound();
+
+        $this->deleteJson(route('document-generator.batches.items.destroy', [$batch->id, $item->id]))
+            ->assertNotFound();
+    }
+
     private function createBatchWithTemplate(?User $owner = null, array $attributes = []): DocumentBatch
     {
         Storage::disk('local')->put('document-generator/template.docx', 'template-content');

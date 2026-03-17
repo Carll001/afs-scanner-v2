@@ -119,4 +119,31 @@ class DashboardTest extends TestCase
                 ->where('template_summary.year_rule_count', 2)
             );
     }
+
+    public function test_soft_deleted_batches_do_not_appear_on_dashboard(): void
+    {
+        $user = User::factory()->create();
+
+        $visibleBatch = DocumentBatch::factory()->for($user)->create([
+            'status' => 'completed',
+            'success_items' => 1,
+        ]);
+        $deletedBatch = DocumentBatch::factory()->for($user)->create([
+            'status' => 'failed',
+            'success_items' => 5,
+        ]);
+
+        $deletedBatch->delete();
+
+        $this->actingAs($user)
+            ->get(route('dashboard'))
+            ->assertOk()
+            ->assertInertia(fn (Assert $page) => $page
+                ->where('stats.total_batches', 1)
+                ->where('stats.failed_batches', 0)
+                ->where('stats.total_generated_files', 2)
+                ->has('recent_batches', 1)
+                ->where('recent_batches.0.id', $visibleBatch->id)
+            );
+    }
 }

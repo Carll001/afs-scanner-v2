@@ -11,6 +11,17 @@ import {
     CardTitle,
 } from '@/components/ui/card';
 import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
+import { Spinner } from '@/components/ui/spinner';
+import documentGeneratorRoutes from '@/routes/document-generator';
+import generatedFilesRoutes from '@/routes/generated-files';
+import {
     FolderOpen,
     FileSpreadsheet,
     LayoutTemplate,
@@ -46,6 +57,9 @@ const props = defineProps<{
 
 const historyData = ref<PaginatedResponse<HistoryBatch>>(props.initialHistory);
 const historyLoading = ref(false);
+const deleteDialogOpen = ref(false);
+const deletingBatch = ref(false);
+const pendingDeleteBatch = ref<HistoryBatch | null>(null);
 
 const getApi = async <T,>(url: string): Promise<T> => {
     const response = await fetch(url, {
@@ -60,6 +74,22 @@ const getApi = async <T,>(url: string): Promise<T> => {
     if (!response.ok)
         throw new Error(`Request failed with status ${response.status}`);
     return (await response.json()) as T;
+};
+
+const sendDelete = async (url: string): Promise<void> => {
+    const response = await fetch(url, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: {
+            Accept: 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-XSRF-TOKEN': decodeURIComponent(document.cookie.split('; ').find((value) => value.startsWith('XSRF-TOKEN='))?.split('=')[1] ?? ''),
+        },
+    });
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+    }
 };
 
 const statusConfig = (status: string) => {
@@ -91,6 +121,41 @@ const formatDate = (dateStr: string | null) => {
         hour: '2-digit',
         minute: '2-digit',
     });
+};
+
+const openDeleteDialog = (batch: HistoryBatch) => {
+    pendingDeleteBatch.value = batch;
+    deleteDialogOpen.value = true;
+};
+
+const closeDeleteDialog = () => {
+    deleteDialogOpen.value = false;
+    pendingDeleteBatch.value = null;
+};
+
+const confirmDeleteBatch = async () => {
+    if (!pendingDeleteBatch.value) {
+        return;
+    }
+
+    deletingBatch.value = true;
+
+    try {
+        await sendDelete(
+            documentGeneratorRoutes.batches.destroy.url({
+                batch: pendingDeleteBatch.value.id,
+            }),
+        );
+
+        await loadHistory(
+            historyData.value.current_page > 1 && historyData.value.data.length === 1
+                ? historyData.value.current_page - 1
+                : historyData.value.current_page,
+        );
+        closeDeleteDialog();
+    } finally {
+        deletingBatch.value = false;
+    }
 };
 </script>
 
@@ -130,11 +195,10 @@ const formatDate = (dateStr: string | null) => {
             </div>
 
             <div v-else class="space-y-3">
-                <Link
+                <div
                     v-for="batch in historyData.data"
                     :key="batch.id"
-                    :href="`/generated-files/${batch.id}`"
-                    class="group relative block overflow-hidden rounded-xl border bg-card p-5 transition-all hover:border-primary/50 hover:ring-2 hover:ring-primary/20"
+                    class="group relative overflow-hidden rounded-xl border bg-card p-5 transition-all hover:border-primary/50 hover:ring-2 hover:ring-primary/20"
                 >
                     <div
                         class="flex flex-col gap-6 md:flex-row md:items-center"
@@ -196,13 +260,23 @@ const formatDate = (dateStr: string | null) => {
                             </div>
                         </div>
 
-                        <div class="hidden md:block">
-                            <ChevronRight
-                                class="size-5 text-muted-foreground transition-transform group-hover:translate-x-1"
-                            />
+                        <div class="flex items-center gap-2">
+                            <Button as-child variant="outline" size="sm">
+                                <Link :href="generatedFilesRoutes.show({ batch: batch.id })">
+                                    Open
+                                </Link>
+                            </Button>
+                            <Button variant="destructive" size="sm" @click="openDeleteDialog(batch)">
+                                Delete
+                            </Button>
+                            <div class="hidden md:block">
+                                <ChevronRight
+                                    class="size-5 text-muted-foreground transition-transform group-hover:translate-x-1"
+                                />
+                            </div>
                         </div>
                     </div>
-                </Link>
+                </div>
             </div>
 
             <div class="mt-6 flex items-center justify-between border-t pt-6">
@@ -236,4 +310,23 @@ const formatDate = (dateStr: string | null) => {
             </div>
         </CardContent>
     </Card>
+
+    <Dialog :open="deleteDialogOpen" @update:open="(open) => { if (!open) closeDeleteDialog(); }">
+        <DialogContent>
+            <DialogHeader>
+                <DialogTitle>Delete Batch #{{ pendingDeleteBatch?.id ?? '-' }}?</DialogTitle>
+                <DialogDescription>
+                    This batch will be hidden from generated files and history. Stored files will remain on disk for now.
+                </DialogDescription>
+            </DialogHeader>
+
+            <DialogFooter>
+                <Button variant="outline" @click="closeDeleteDialog">Cancel</Button>
+                <Button variant="destructive" :disabled="deletingBatch" @click="confirmDeleteBatch">
+                    <Spinner v-if="deletingBatch" class="size-4" />
+                    Delete batch
+                </Button>
+            </DialogFooter>
+        </DialogContent>
+    </Dialog>
 </template>

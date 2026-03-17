@@ -136,6 +136,9 @@ const editErrorMessage = ref<string | null>(null);
 const editErrors = ref<Record<string, string[]>>({});
 const editingItem = ref<BatchItem | null>(null);
 const editForm = reactive<Record<string, string>>({});
+const deleteBatchDialogOpen = ref(false);
+const batchDeleting = ref(false);
+const batchPendingDelete = ref<HistoryBatch | null>(null);
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let companySearchDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -213,6 +216,22 @@ const sendJson = async <T>(url: string, method: 'PUT', payload: unknown): Promis
     }
 
     return (await response.json()) as T;
+};
+
+const sendDelete = async (url: string): Promise<void> => {
+    const response = await fetch(url, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: {
+            Accept: 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-XSRF-TOKEN': csrfToken(),
+        },
+    });
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+    }
 };
 
 const postBatch = async () => {
@@ -502,6 +521,64 @@ const closeEditDialog = () => {
     resetEditForm();
 };
 
+const openDeleteBatchDialog = (batch: HistoryBatch) => {
+    batchPendingDelete.value = batch;
+    deleteBatchDialogOpen.value = true;
+};
+
+const closeDeleteBatchDialog = () => {
+    deleteBatchDialogOpen.value = false;
+    batchPendingDelete.value = null;
+};
+
+const confirmDeleteBatch = async () => {
+    if (!batchPendingDelete.value) {
+        return;
+    }
+
+    const deletingBatchId = batchPendingDelete.value.id;
+    batchDeleting.value = true;
+
+    try {
+        await sendDelete(
+            documentGeneratorRoutes.batches.destroy.url({
+                batch: deletingBatchId,
+            }),
+        );
+
+        if (activeBatchId.value === deletingBatchId) {
+            activeBatchId.value = null;
+            progress.value = null;
+            itemsData.value = {
+                current_page: 1,
+                data: [],
+                last_page: 1,
+                per_page: itemsData.value.per_page,
+                total: 0,
+            };
+            activityData.value = {
+                current_page: 1,
+                data: [],
+                last_page: 1,
+                per_page: activityData.value.per_page,
+                total: 0,
+            };
+            stopPolling();
+        }
+
+        await loadHistory(
+            historyData.value.current_page > 1 && historyData.value.data.length === 1
+                ? historyData.value.current_page - 1
+                : historyData.value.current_page,
+        );
+        closeDeleteBatchDialog();
+    } catch (error) {
+        createErrorMessage.value = error instanceof Error ? error.message : 'Unable to delete batch.';
+    } finally {
+        batchDeleting.value = false;
+    }
+};
+
 const saveEditedItem = async () => {
     if (!activeBatchId.value || !editingItem.value) {
         return;
@@ -706,23 +783,34 @@ const historyColumns = computed<ColumnDef<HistoryBatch>[]>(() => [
         header: 'Action',
         enableSorting: false,
         cell: ({ row }) =>
-            h(
-                Button,
-                {
-                    variant: 'outline',
-                    size: 'sm',
-                    onClick: async () => {
-                        activeBatchId.value = row.original.id;
-                        await Promise.all([loadProgress(), loadBatchItems(1), loadActivityLogs(1)]);
-                        if (progress.value && !['completed', 'failed'].includes(progress.value.status)) {
-                            startPolling();
-                        } else {
-                            stopPolling();
-                        }
+            h('div', { class: 'flex items-center gap-2' }, [
+                h(
+                    Button,
+                    {
+                        variant: 'outline',
+                        size: 'sm',
+                        onClick: async () => {
+                            activeBatchId.value = row.original.id;
+                            await Promise.all([loadProgress(), loadBatchItems(1), loadActivityLogs(1)]);
+                            if (progress.value && !['completed', 'failed'].includes(progress.value.status)) {
+                                startPolling();
+                            } else {
+                                stopPolling();
+                            }
+                        },
                     },
-                },
-                () => 'Open',
-            ),
+                    () => 'Open',
+                ),
+                h(
+                    Button,
+                    {
+                        variant: 'destructive',
+                        size: 'sm',
+                        onClick: () => openDeleteBatchDialog(row.original),
+                    },
+                    () => 'Delete',
+                ),
+            ]),
     },
 ]);
 
@@ -915,6 +1003,25 @@ onBeforeUnmount(() => {
                         <Button :disabled="editSubmitting" @click="saveEditedItem">
                             <Spinner v-if="editSubmitting" class="size-4" />
                             Save and Regenerate
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog :open="deleteBatchDialogOpen" @update:open="(open) => { if (!open) closeDeleteBatchDialog(); }">
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Delete Batch #{{ batchPendingDelete?.id ?? '-' }}?</DialogTitle>
+                        <DialogDescription>
+                            This batch will be hidden from history and generated files. Stored files will remain on disk for now.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <DialogFooter>
+                        <Button variant="outline" @click="closeDeleteBatchDialog">Cancel</Button>
+                        <Button variant="destructive" :disabled="batchDeleting" @click="confirmDeleteBatch">
+                            <Spinner v-if="batchDeleting" class="size-4" />
+                            Delete batch
                         </Button>
                     </DialogFooter>
                 </DialogContent>
