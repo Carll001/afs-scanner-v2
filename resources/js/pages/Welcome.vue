@@ -15,13 +15,13 @@ withDefaults(
 </script>
 
 <template>
-    <Head title="Welcome to DocGen" />
+    <Head title="Welcome to Afs Scanner" />
     
     <div class="min-h-screen bg-[#FDFDFC] text-[#1b1b18] dark:bg-[#0a0a0a] dark:text-[#EDEDEC] font-sans">
         <nav class="mx-auto flex max-w-7xl items-center justify-between p-6 lg:px-8">
             <div class="flex items-center gap-2">
                 <div class="h-8 w-8 rounded-lg bg-gradient-to-br from-slate-950 to-slate-800 shadow-lg"></div>
-                <span class="text-xl font-bold tracking-tight">DocGen</span>
+                <span class="text-xl font-bold tracking-tight">Afs Scanner</span>
             </div>
             
             <div class="flex items-center gap-4">
@@ -108,7 +108,7 @@ withDefaults(
         </section>
 
         <footer class="border-t border-slate-100 py-12 text-center text-sm text-slate-400 dark:border-slate-900">
-            &copy; 2026 DocGen Automation. All rights reserved.
+            &copy; 2026 Afs Scanner Automation. All rights reserved.
         </footer>
     </div>
 </template>
