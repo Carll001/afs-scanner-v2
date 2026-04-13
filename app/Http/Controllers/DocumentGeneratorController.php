@@ -12,9 +12,9 @@ use App\Models\DocumentGeneratorTemplate;
 use App\Models\User;
 use App\Services\DocumentBatchActivityLogger;
 use App\Services\ExcelExtractionService;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -69,7 +69,7 @@ class DocumentGeneratorController extends Controller
         DocumentBatchStoreRequest $request,
         ExcelExtractionService $excelExtractionService
     ): JsonResponse {
-        $sheetIndex = (int) $request->integer('sheet_index', 0);
+        $sheetIndex = 0;
 
         $excelFile = $request->file('excel_file');
         $defaultTemplateFile = $request->file('default_template_file');
@@ -85,6 +85,13 @@ class DocumentGeneratorController extends Controller
         $extracted = $excelExtractionService->extract(Storage::disk('local')->path($excelPath), $sheetIndex);
         $headers = $extracted['headers'];
         $rows = $extracted['rows'];
+        $previousWorkbookPath = $this->resolvePreviousWorkbookPath($request->user()->id);
+
+        if ($previousWorkbookPath !== null) {
+            $previousWorkbookRows = $excelExtractionService->extract($previousWorkbookPath, $sheetIndex)['rows'];
+            $rows = $this->enrichRowsWithPreviousWorkbookData($rows, $previousWorkbookRows);
+            $headers = $this->mergeHeadersWithRows($headers, $rows);
+        }
 
         $batch = DB::transaction(function () use (
             $request,
@@ -208,6 +215,7 @@ class DocumentGeneratorController extends Controller
                     'docx_available' => ! empty($item->docx_path),
                     'pdf_available' => ! empty($item->pdf_path),
                     'error_message' => $item->error_message,
+                    'error_details' => $item->error_details ?? null,
                     'created_at' => $item->created_at?->toISOString(),
                     'updated_at' => $item->updated_at?->toISOString(),
                 ];
@@ -315,6 +323,7 @@ class DocumentGeneratorController extends Controller
             $lockedItem->docx_path = null;
             $lockedItem->pdf_path = null;
             $lockedItem->error_message = null;
+            $lockedItem->error_details = null;
             $lockedItem->started_at = null;
             $lockedItem->completed_at = null;
             $lockedItem->save();
@@ -803,6 +812,7 @@ class DocumentGeneratorController extends Controller
             'docx_available' => ! empty($item->docx_path),
             'pdf_available' => ! empty($item->pdf_path),
             'error_message' => $item->error_message,
+            'error_details' => $item->error_details ?? null,
             'created_at' => $item->created_at?->toISOString(),
             'updated_at' => $item->updated_at?->toISOString(),
         ];
@@ -815,12 +825,12 @@ class DocumentGeneratorController extends Controller
 
         if ($driver === 'pgsql') {
             $query->whereRaw(
-                "exists (
+                'exists (
                     select 1
                     from jsonb_each_text(row_data::jsonb) as company_entry(key, value)
                     where lower(company_entry.key) like ?
                     and lower(company_entry.value) like ?
-                )",
+                )',
                 ['%company%', $search]
             );
 
@@ -856,6 +866,97 @@ class DocumentGeneratorController extends Controller
     private static function normalizeCompanyKey(string $key): string
     {
         return preg_replace('/[^a-z0-9]+/', '', mb_strtolower($key)) ?? '';
+    }
+
+    private function resolvePreviousWorkbookPath(int $userId): ?string
+    {
+        $disk = Storage::disk('local');
+
+        /** @var \Illuminate\Support\Collection<int, DocumentBatch> $previousBatches */
+        $previousBatches = DocumentBatch::query()
+            ->where('user_id', $userId)
+            ->whereNotNull('excel_path')
+            ->latest('id')
+            ->get(['id', 'excel_path']);
+
+        foreach ($previousBatches as $previousBatch) {
+            $excelPath = $previousBatch->excel_path;
+            if (! is_string($excelPath) || trim($excelPath) === '') {
+                continue;
+            }
+
+            if (! $disk->exists($excelPath)) {
+                continue;
+            }
+
+            return $disk->path($excelPath);
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  list<array<string, string>>  $currentRows
+     * @param  list<array<string, string>>  $previousRows
+     * @return list<array<string, string>>
+     */
+    private function enrichRowsWithPreviousWorkbookData(array $currentRows, array $previousRows): array
+    {
+        $previousRowsByCompany = $this->mapRowsByCompany($previousRows);
+        $enrichedRows = [];
+
+        foreach ($currentRows as $rowData) {
+            $company = trim(self::extractCompanyFromRowData($rowData));
+            if ($company === '' || ! array_key_exists($company, $previousRowsByCompany)) {
+                $enrichedRows[] = $rowData;
+
+                continue;
+            }
+
+            $enrichedRows[] = $rowData + $previousRowsByCompany[$company];
+        }
+
+        return $enrichedRows;
+    }
+
+    /**
+     * @param  list<array<string, string>>  $rows
+     * @return array<string, array<string, string>>
+     */
+    private function mapRowsByCompany(array $rows): array
+    {
+        $rowsByCompany = [];
+
+        foreach ($rows as $rowData) {
+            $company = trim(self::extractCompanyFromRowData($rowData));
+            if ($company === '' || array_key_exists($company, $rowsByCompany)) {
+                continue;
+            }
+
+            $rowsByCompany[$company] = $rowData;
+        }
+
+        return $rowsByCompany;
+    }
+
+    /**
+     * @param  list<string>  $headers
+     * @param  list<array<string, string>>  $rows
+     * @return list<string>
+     */
+    private function mergeHeadersWithRows(array $headers, array $rows): array
+    {
+        $mergedHeaders = $headers;
+
+        foreach ($rows as $rowData) {
+            foreach (array_keys($rowData) as $header) {
+                if (! in_array($header, $mergedHeaders, true)) {
+                    $mergedHeaders[] = $header;
+                }
+            }
+        }
+
+        return $mergedHeaders;
     }
 
     private function recalculateBatchState(DocumentBatch $batch): void

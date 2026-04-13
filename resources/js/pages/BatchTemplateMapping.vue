@@ -481,6 +481,13 @@ const onExistingTemplateFileChange = (template: EditableYearTemplate, event: Eve
                                 accept=".docx"
                                 @change="onDefaultTemplateFileChange"
                             />
+                                <p class="text-xs text-muted-foreground">
+                                    In the 2025 template, placeholders like
+                                    <code>{NET INCOME}</code> treat the current file value as 2025 and add the matched
+                                    old-file base value, and
+                                    subtraction stays explicit, such as
+                                    <code>{TRADE RECEIVABLES 2025-TRADE RECEIVABLES}</code>.
+                                </p>
                             <p v-if="defaultTemplateErrors.template_file" class="text-sm text-destructive">
                                 {{ defaultTemplateErrors.template_file[0] }}
                             </p>

@@ -402,6 +402,13 @@ const removeYearTemplate = async (template: EditableYearTemplate) => {
                     <div class="grid gap-2">
                         <Label for="default-template-file">Replace default DOCX</Label>
                         <Input id="default-template-file" type="file" accept=".docx" @change="onDefaultTemplateFileChange" />
+                                <p class="text-xs text-muted-foreground">
+                                    In the 2025 template, placeholders like
+                                    <code>{NET INCOME}</code> treat the current file value as 2025 and add the matched
+                                    old-file base value, and
+                                    subtraction stays explicit, such as
+                                    <code>{TRADE RECEIVABLES 2025-TRADE RECEIVABLES}</code>.
+                                </p>
                         <p v-if="defaultTemplateErrors.template_file" class="text-sm text-destructive">
                             {{ defaultTemplateErrors.template_file[0] }}
                         </p>

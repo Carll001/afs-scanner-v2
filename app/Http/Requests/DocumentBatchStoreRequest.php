@@ -27,7 +27,6 @@ class DocumentBatchStoreRequest extends FormRequest
         return [
             'excel_file' => ['required', 'file', 'mimes:xls,xlsx'],
             'default_template_file' => ['nullable', 'file', 'mimes:docx'],
-            'sheet_index' => ['nullable', 'integer', 'min:0'],
             'year_templates' => ['nullable', 'array'],
             'year_templates.*.year' => ['required_with:year_templates.*.template_file', 'integer', 'digits:4'],
             'year_templates.*.template_file' => ['required_with:year_templates.*.year', 'file', 'mimes:docx'],

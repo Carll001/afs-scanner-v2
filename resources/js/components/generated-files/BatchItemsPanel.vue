@@ -79,6 +79,10 @@ type BatchItem = {
     docx_available: boolean;
     pdf_available: boolean;
     error_message: string | null;
+    error_details: {
+        missing_data?: string[];
+        errors?: string[];
+    } | null;
     created_at: string | null;
     updated_at: string | null;
 };
@@ -137,6 +141,8 @@ const editForm = reactive<Record<string, string>>({});
 const deleteItemDialogOpen = ref(false);
 const deletingItem = ref(false);
 const pendingDeleteItem = ref<BatchItem | null>(null);
+const errorDetailsDialogOpen = ref(false);
+const selectedErrorItem = ref<BatchItem | null>(null);
 const regeneratingItemIds = ref<number[]>([]);
 
 let companySearchDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -330,6 +336,16 @@ const closeDeleteItemDialog = () => {
     pendingDeleteItem.value = null;
 };
 
+const openErrorDetailsDialog = (item: BatchItem) => {
+    selectedErrorItem.value = item;
+    errorDetailsDialogOpen.value = true;
+};
+
+const closeErrorDetailsDialog = () => {
+    errorDetailsDialogOpen.value = false;
+    selectedErrorItem.value = null;
+};
+
 const stopPolling = () => {
     pollingActive.value = false;
 
@@ -426,6 +442,7 @@ const optimisticQueueItem = (itemId: number, rowData: Record<string, string>) =>
                       docx_available: false,
                       pdf_available: false,
                       error_message: null,
+                      error_details: null,
                       updated_at: new Date().toISOString(),
                   }
                 : item,
@@ -452,6 +469,12 @@ const summaryStats = computed(() => {
 });
 
 const editFormEntries = computed(() => Object.entries(editForm));
+const selectedMissingData = computed(
+    () => selectedErrorItem.value?.error_details?.missing_data ?? [],
+);
+const selectedValidationErrors = computed(
+    () => selectedErrorItem.value?.error_details?.errors ?? [],
+);
 
 const saveEditedItem = async () => {
     if (!editingItem.value) {
@@ -705,6 +728,20 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
             const item = row.original;
 
             return h('div', { class: 'flex items-center gap-1' }, [
+                item.status === 'failed' && item.error_details
+                    ? h(
+                          Button,
+                          {
+                              variant: 'ghost',
+                              size: 'sm',
+                              class: 'h-8 px-2 text-xs',
+                              onClick: () => openErrorDetailsDialog(item),
+                          },
+                          {
+                              default: () => 'Error details',
+                          },
+                      )
+                    : null,
                 h(
                     Button,
                     {
@@ -1007,6 +1044,63 @@ onBeforeUnmount(() => {
             />
         </CardContent>
     </Card>
+
+    <Dialog
+        :open="errorDetailsDialogOpen"
+        @update:open="
+            (open) => {
+                if (!open) closeErrorDetailsDialog();
+            }
+        "
+    >
+        <DialogContent class="sm:max-w-xl">
+            <DialogHeader>
+                <DialogTitle>
+                    Error Details for Row {{ selectedErrorItem?.row_number ?? '-' }}
+                </DialogTitle>
+                <DialogDescription>
+                    Review the missing fields and validation issues before editing this row.
+                </DialogDescription>
+            </DialogHeader>
+
+            <div class="space-y-4 py-2">
+                <div>
+                    <p class="text-sm font-medium">Summary</p>
+                    <p class="mt-1 text-sm text-muted-foreground">
+                        {{ selectedErrorItem?.error_message ?? 'No error message recorded.' }}
+                    </p>
+                </div>
+
+                <div>
+                    <p class="text-sm font-medium">Missing Data</p>
+                    <p v-if="selectedMissingData.length === 0" class="mt-1 text-sm text-muted-foreground">
+                        No missing fields were recorded.
+                    </p>
+                    <ul v-else class="mt-2 space-y-1 text-sm text-muted-foreground">
+                        <li v-for="field in selectedMissingData" :key="field">
+                            {{ field }}
+                        </li>
+                    </ul>
+                </div>
+
+                <div>
+                    <p class="text-sm font-medium">Validation Errors</p>
+                    <p v-if="selectedValidationErrors.length === 0" class="mt-1 text-sm text-muted-foreground">
+                        No additional validation errors were recorded.
+                    </p>
+                    <ul v-else class="mt-2 space-y-1 text-sm text-muted-foreground">
+                        <li v-for="message in selectedValidationErrors" :key="message">
+                            {{ message }}
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <DialogFooter>
+                <Button variant="outline" @click="closeErrorDetailsDialog">Close</Button>
+            </DialogFooter>
+        </DialogContent>
+    </Dialog>
 
     <Dialog
         :open="editDialogOpen"

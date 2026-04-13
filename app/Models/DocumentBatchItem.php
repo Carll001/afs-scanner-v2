@@ -24,6 +24,7 @@ class DocumentBatchItem extends Model
         'docx_path',
         'pdf_path',
         'error_message',
+        'error_details',
         'started_at',
         'completed_at',
     ];
@@ -35,6 +36,7 @@ class DocumentBatchItem extends Model
     {
         return [
             'row_data' => 'array',
+            'error_details' => 'array',
             'started_at' => 'datetime',
             'completed_at' => 'datetime',
             'deleted_at' => 'datetime',

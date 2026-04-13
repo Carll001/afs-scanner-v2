@@ -16,7 +16,10 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Mockery;
+use PhpOffice\PhpWord\IOFactory as WordIOFactory;
+use PhpOffice\PhpWord\PhpWord;
 use Tests\TestCase;
+use ZipArchive;
 
 class DocumentGeneratorTest extends TestCase
 {
@@ -51,6 +54,7 @@ class DocumentGeneratorTest extends TestCase
             $mock
                 ->shouldReceive('extract')
                 ->once()
+                ->with(Mockery::type('string'), 0)
                 ->andReturn([
                     'headers' => ['Name', 'Email', 'SEC REGISTRATION DATE'],
                     'rows' => [
@@ -63,7 +67,6 @@ class DocumentGeneratorTest extends TestCase
         $response = $this->post(route('document-generator.batches.store'), [
             'excel_file' => UploadedFile::fake()->create('source.xlsx', 20),
             'default_template_file' => UploadedFile::fake()->create('template.docx', 20),
-            'sheet_index' => 0,
         ], [
             'Accept' => 'application/json',
             'X-Requested-With' => 'XMLHttpRequest',
@@ -82,6 +85,191 @@ class DocumentGeneratorTest extends TestCase
         Queue::assertPushed(GenerateDocumentBatchItemJob::class, 2);
     }
 
+    public function test_batch_creation_uses_previous_batch_workbook_to_backfill_matching_company_rows(): void
+    {
+        Storage::fake('local');
+        Queue::fake();
+
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $previousBatch = DocumentBatch::factory()->for($user)->create([
+            'excel_path' => "document-generator/{$user->id}/uploads/previous.xlsx",
+        ]);
+        Storage::disk('local')->put((string) $previousBatch->excel_path, 'previous-workbook');
+
+        $this->mock(ExcelExtractionService::class, function ($mock): void {
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->ordered()
+                ->andReturn([
+                    'headers' => ['Company Name', 'NET INCOME 2025', 'SEC REGISTRATION DATE'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'NET INCOME 2025' => '30',
+                        'SEC REGISTRATION DATE' => '7/23/2025 00:00:00',
+                    ]],
+                ]);
+
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->ordered()
+                ->andReturn([
+                    'headers' => ['Company Name', 'NET INCOME'],
+                    'rows' => [[
+                        'Company Name' => ' Acme Corp ',
+                        'NET INCOME' => '20',
+                    ]],
+                ]);
+
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->ordered()
+                ->andReturn([
+                    'headers' => ['Company Name', 'NET INCOME'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'NET INCOME' => '20',
+                    ]],
+                ]);
+        });
+
+        $this->post(route('document-generator.batches.store'), [
+            'excel_file' => UploadedFile::fake()->create('source.xlsx', 20),
+            'default_template_file' => UploadedFile::fake()->create('template.docx', 20),
+        ], [
+            'Accept' => 'application/json',
+            'X-Requested-With' => 'XMLHttpRequest',
+        ])->assertCreated();
+
+        $batch = DocumentBatch::query()->latest('id')->firstOrFail();
+        $item = DocumentBatchItem::query()->where('document_batch_id', $batch->id)->firstOrFail();
+
+        $this->assertSame('20', $item->row_data['NET INCOME'] ?? null);
+        $this->assertSame('30', $item->row_data['NET INCOME 2025'] ?? null);
+        $this->assertContains('NET INCOME', $batch->headers_json ?? []);
+    }
+
+    public function test_batch_creation_does_not_merge_previous_workbook_data_when_company_name_does_not_match(): void
+    {
+        Storage::fake('local');
+        Queue::fake();
+
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $previousBatch = DocumentBatch::factory()->for($user)->create([
+            'excel_path' => "document-generator/{$user->id}/uploads/previous.xlsx",
+        ]);
+        Storage::disk('local')->put((string) $previousBatch->excel_path, 'previous-workbook');
+
+        $this->mock(ExcelExtractionService::class, function ($mock): void {
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->ordered()
+                ->andReturn([
+                    'headers' => ['Company Name', 'NET INCOME 2025', 'SEC REGISTRATION DATE'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'NET INCOME 2025' => '30',
+                        'SEC REGISTRATION DATE' => '7/23/2025 00:00:00',
+                    ]],
+                ]);
+
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->ordered()
+                ->andReturn([
+                    'headers' => ['Company Name', 'NET INCOME'],
+                    'rows' => [[
+                        'Company Name' => 'Different Corp',
+                        'NET INCOME' => '20',
+                    ]],
+                ]);
+        });
+
+        $this->post(route('document-generator.batches.store'), [
+            'excel_file' => UploadedFile::fake()->create('source.xlsx', 20),
+            'default_template_file' => UploadedFile::fake()->create('template.docx', 20),
+        ], [
+            'Accept' => 'application/json',
+            'X-Requested-With' => 'XMLHttpRequest',
+        ])->assertCreated();
+
+        $batch = DocumentBatch::query()->latest('id')->firstOrFail();
+        $item = DocumentBatchItem::query()->where('document_batch_id', $batch->id)->firstOrFail();
+
+        $this->assertSame('30', $item->row_data['NET INCOME 2025'] ?? null);
+        $this->assertArrayNotHasKey('NET INCOME', $item->row_data);
+        $this->assertNotContains('NET INCOME', $batch->headers_json ?? []);
+    }
+
+    public function test_batch_creation_prefers_current_workbook_values_over_previous_batch_values(): void
+    {
+        Storage::fake('local');
+        Queue::fake();
+
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $previousBatch = DocumentBatch::factory()->for($user)->create([
+            'excel_path' => "document-generator/{$user->id}/uploads/previous.xlsx",
+        ]);
+        Storage::disk('local')->put((string) $previousBatch->excel_path, 'previous-workbook');
+
+        $this->mock(ExcelExtractionService::class, function ($mock): void {
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->ordered()
+                ->andReturn([
+                    'headers' => ['Company Name', 'NET INCOME', 'NET INCOME 2025', 'SEC REGISTRATION DATE'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'NET INCOME' => '25',
+                        'NET INCOME 2025' => '30',
+                        'SEC REGISTRATION DATE' => '7/23/2025 00:00:00',
+                    ]],
+                ]);
+
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->ordered()
+                ->andReturn([
+                    'headers' => ['Company Name', 'NET INCOME'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'NET INCOME' => '20',
+                    ]],
+                ]);
+        });
+
+        $this->post(route('document-generator.batches.store'), [
+            'excel_file' => UploadedFile::fake()->create('source.xlsx', 20),
+            'default_template_file' => UploadedFile::fake()->create('template.docx', 20),
+        ], [
+            'Accept' => 'application/json',
+            'X-Requested-With' => 'XMLHttpRequest',
+        ])->assertCreated();
+
+        $item = DocumentBatchItem::query()->latest('id')->firstOrFail();
+
+        $this->assertSame('25', $item->row_data['NET INCOME'] ?? null);
+    }
+
     public function test_batch_creation_stores_year_threshold_templates(): void
     {
         Storage::fake('local');
@@ -94,6 +282,7 @@ class DocumentGeneratorTest extends TestCase
             $mock
                 ->shouldReceive('extract')
                 ->once()
+                ->with(Mockery::type('string'), 0)
                 ->andReturn([
                     'headers' => ['SEC REGISTRATION DATE'],
                     'rows' => [
@@ -397,6 +586,7 @@ class DocumentGeneratorTest extends TestCase
             $mock
                 ->shouldReceive('extract')
                 ->once()
+                ->with(Mockery::type('string'), 0)
                 ->andReturn([
                     'headers' => ['SEC REGISTRATION DATE'],
                     'rows' => [
@@ -407,7 +597,6 @@ class DocumentGeneratorTest extends TestCase
 
         $this->post(route('document-generator.batches.store'), [
             'excel_file' => UploadedFile::fake()->create('source.xlsx', 20),
-            'sheet_index' => 0,
         ], [
             'Accept' => 'application/json',
             'X-Requested-With' => 'XMLHttpRequest',
@@ -639,10 +828,11 @@ class DocumentGeneratorTest extends TestCase
             ->once()
             ->andReturn([
                 'missing_data' => [],
+                'errors' => [],
             ]);
         $docxService->shouldReceive('render')
             ->once()
-            ->andReturnUsing(function (string $templatePath, string $outputPath): void {
+            ->andReturnUsing(function (string $templatePath, string $outputPath, array $rowData = [], ?int $selectedTemplateYear = null): void {
                 file_put_contents($outputPath, 'docx-content');
             });
 
@@ -696,6 +886,7 @@ class DocumentGeneratorTest extends TestCase
             ->once()
             ->andReturn([
                 'missing_data' => ['inn'],
+                'errors' => [],
             ]);
         $docxService->shouldNotReceive('render');
 
@@ -712,10 +903,511 @@ class DocumentGeneratorTest extends TestCase
 
         $this->assertSame('failed', $item->status);
         $this->assertStringContainsString('Missing data: inn', (string) $item->error_message);
+        $this->assertSame([
+            'missing_data' => ['inn'],
+            'errors' => [],
+        ], $item->error_details);
         $this->assertDatabaseHas('document_batch_item_activity_logs', [
             'document_batch_item_id' => $item->id,
             'action' => 'generation_failed_validation',
         ]);
+    }
+
+    public function test_job_uses_2025_template_auto_sum_placeholder(): void
+    {
+        Storage::fake('local');
+
+        $batch = $this->createBatchWithDocxTemplate([
+            'NET INCOME',
+        ]);
+        $this->addYearDocxTemplateToBatch($batch, 2025, [
+            'NET INCOME',
+        ], 'template-2025.docx');
+
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 2,
+            'row_data' => [
+                'NET INCOME' => '20',
+                'NET INCOME 2025' => '30',
+                'SEC REGISTRATION DATE' => '7/23/2025 00:00:00',
+            ],
+            'status' => 'queued',
+        ]);
+
+        $pdfService = Mockery::mock(PdfConversionService::class);
+        $pdfService->shouldReceive('convertDocxToPdf')
+            ->once()
+            ->andReturnUsing(function (string $docxPath): string {
+                $pdfPath = preg_replace('/\.docx$/', '.pdf', $docxPath);
+                file_put_contents((string) $pdfPath, 'pdf-content');
+
+                return (string) $pdfPath;
+            });
+
+        (new GenerateDocumentBatchItemJob($item->id))->handle(
+            app(\App\Services\DocumentBatchActivityLogger::class),
+            app(DocxTemplateService::class),
+            $pdfService,
+        );
+
+        $item->refresh();
+
+        $this->assertSame('pdf_done', $item->status);
+        $this->assertNotNull($item->docx_path);
+        $this->assertStringContainsString(
+            '50.00',
+            $this->readDocxDocumentXml(Storage::disk('local')->path((string) $item->docx_path))
+        );
+    }
+
+    public function test_job_keeps_direct_2025_placeholder_in_non_2025_template(): void
+    {
+        Storage::fake('local');
+
+        $batch = $this->createBatchWithDocxTemplate([
+            'NET INCOME 2025',
+        ]);
+        $this->addYearDocxTemplateToBatch($batch, 2025, [
+            'NET INCOME 2025',
+        ], 'template-2025.docx');
+
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 2,
+            'row_data' => [
+                'NET INCOME' => '20',
+                'NET INCOME 2025' => '30',
+                'SEC REGISTRATION DATE' => '7/23/2024 00:00:00',
+            ],
+            'status' => 'queued',
+        ]);
+
+        $pdfService = Mockery::mock(PdfConversionService::class);
+        $pdfService->shouldReceive('convertDocxToPdf')
+            ->once()
+            ->andReturnUsing(function (string $docxPath): string {
+                $pdfPath = preg_replace('/\.docx$/', '.pdf', $docxPath);
+                file_put_contents((string) $pdfPath, 'pdf-content');
+
+                return (string) $pdfPath;
+            });
+
+        (new GenerateDocumentBatchItemJob($item->id))->handle(
+            app(\App\Services\DocumentBatchActivityLogger::class),
+            app(DocxTemplateService::class),
+            $pdfService,
+        );
+
+        $item->refresh();
+
+        $this->assertSame('pdf_done', $item->status);
+        $this->assertNotNull($item->docx_path);
+        $this->assertStringContainsString(
+            '30.00',
+            $this->readDocxDocumentXml(Storage::disk('local')->path((string) $item->docx_path))
+        );
+    }
+
+    public function test_job_marks_item_failed_when_2025_auto_sum_placeholder_requires_missing_header(): void
+    {
+        Storage::fake('local');
+
+        $batch = $this->createBatchWithDocxTemplate([
+            'NET INCOME',
+        ]);
+        $this->addYearDocxTemplateToBatch($batch, 2025, [
+            'NET INCOME',
+        ], 'template-2025.docx');
+
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 2,
+            'row_data' => [
+                'NET INCOME 2025' => '30',
+                'SEC REGISTRATION DATE' => '7/23/2025 00:00:00',
+            ],
+            'status' => 'queued',
+        ]);
+
+        $pdfService = Mockery::mock(PdfConversionService::class);
+        $pdfService->shouldNotReceive('convertDocxToPdf');
+
+        (new GenerateDocumentBatchItemJob($item->id))->handle(
+            app(\App\Services\DocumentBatchActivityLogger::class),
+            app(DocxTemplateService::class),
+            $pdfService,
+        );
+
+        $item->refresh();
+
+        $this->assertSame('failed', $item->status);
+        $this->assertStringContainsString('{NET INCOME}', (string) $item->error_message);
+        $this->assertStringContainsString('NET INCOME', (string) $item->error_message);
+        $this->assertDatabaseHas('document_batch_item_activity_logs', [
+            'document_batch_item_id' => $item->id,
+            'action' => 'generation_failed_validation',
+        ]);
+    }
+
+    public function test_job_can_use_previous_batch_backfill_for_2025_auto_sum_placeholder(): void
+    {
+        Storage::fake('local');
+
+        $user = User::factory()->create();
+
+        $previousBatch = DocumentBatch::factory()->for($user)->create([
+            'excel_path' => "document-generator/{$user->id}/uploads/previous.xlsx",
+        ]);
+        Storage::disk('local')->put((string) $previousBatch->excel_path, 'previous-workbook');
+
+        $batch = $this->createBatchWithDocxTemplate([
+            'NET INCOME',
+        ], $user);
+        $this->addYearDocxTemplateToBatch($batch, 2025, [
+            'NET INCOME',
+        ], 'template-2025.docx');
+
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 2,
+            'row_data' => [
+                'Company Name' => 'Acme Corp',
+                'NET INCOME 2025' => '30',
+                'SEC REGISTRATION DATE' => '7/23/2025 00:00:00',
+            ],
+            'status' => 'queued',
+        ]);
+
+        $this->mock(ExcelExtractionService::class, function ($mock): void {
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->andReturn([
+                    'headers' => ['Company Name', 'NET INCOME'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'NET INCOME' => '20',
+                    ]],
+                ]);
+        });
+
+        $pdfService = Mockery::mock(PdfConversionService::class);
+        $pdfService->shouldReceive('convertDocxToPdf')
+            ->once()
+            ->andReturnUsing(function (string $docxPath): string {
+                $pdfPath = preg_replace('/\.docx$/', '.pdf', $docxPath);
+                file_put_contents((string) $pdfPath, 'pdf-content');
+
+                return (string) $pdfPath;
+            });
+
+        (new GenerateDocumentBatchItemJob($item->id))->handle(
+            app(\App\Services\DocumentBatchActivityLogger::class),
+            app(DocxTemplateService::class),
+            $pdfService,
+        );
+
+        $item->refresh();
+
+        $this->assertSame('pdf_done', $item->status);
+        $this->assertNotNull($item->docx_path);
+        $this->assertStringContainsString(
+            '50.00',
+            $this->readDocxDocumentXml(Storage::disk('local')->path((string) $item->docx_path))
+        );
+    }
+
+    public function test_job_fails_for_2025_auto_sum_placeholder_when_no_previous_batch_data_exists(): void
+    {
+        Storage::fake('local');
+        Queue::fake();
+
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $this->mock(ExcelExtractionService::class, function ($mock): void {
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->andReturn([
+                    'headers' => ['Company Name', 'NET INCOME 2025', 'SEC REGISTRATION DATE'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'NET INCOME 2025' => '30',
+                        'SEC REGISTRATION DATE' => '7/23/2025 00:00:00',
+                    ]],
+                ]);
+        });
+
+        $this->post(route('document-generator.batches.store'), [
+            'excel_file' => UploadedFile::fake()->create('source.xlsx', 20),
+            'default_template_file' => $this->createDocxUploadedFile('default.docx', ['NET INCOME']),
+            'year_templates' => [
+                [
+                    'year' => 2025,
+                    'template_file' => $this->createDocxUploadedFile('2025.docx', ['NET INCOME']),
+                ],
+            ],
+        ], [
+            'Accept' => 'application/json',
+            'X-Requested-With' => 'XMLHttpRequest',
+        ])->assertCreated();
+
+        $item = DocumentBatchItem::query()->latest('id')->firstOrFail();
+
+        $pdfService = Mockery::mock(PdfConversionService::class);
+        $pdfService->shouldNotReceive('convertDocxToPdf');
+
+        (new GenerateDocumentBatchItemJob($item->id))->handle(
+            app(\App\Services\DocumentBatchActivityLogger::class),
+            app(DocxTemplateService::class),
+            $pdfService,
+        );
+
+        $item->refresh();
+
+        $this->assertSame('failed', $item->status);
+        $this->assertStringContainsString('{NET INCOME}', (string) $item->error_message);
+        $this->assertStringContainsString('NET INCOME', (string) $item->error_message);
+    }
+
+    public function test_job_can_use_previous_batch_backfill_for_2025_subtraction_placeholder(): void
+    {
+        Storage::fake('local');
+        Queue::fake();
+
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $previousBatch = DocumentBatch::factory()->for($user)->create([
+            'excel_path' => "document-generator/{$user->id}/uploads/previous.xlsx",
+        ]);
+        Storage::disk('local')->put((string) $previousBatch->excel_path, 'previous-workbook');
+
+        $this->mock(ExcelExtractionService::class, function ($mock): void {
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->ordered()
+                ->andReturn([
+                    'headers' => ['Company Name', 'TRADE RECEIVABLES 2025', 'SEC REGISTRATION DATE'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'TRADE RECEIVABLES 2025' => '120',
+                        'SEC REGISTRATION DATE' => '7/23/2025 00:00:00',
+                    ]],
+                ]);
+
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->ordered()
+                ->andReturn([
+                    'headers' => ['Company Name', 'TRADE RECEIVABLES'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'TRADE RECEIVABLES' => '20',
+                    ]],
+                ]);
+
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->ordered()
+                ->andReturn([
+                    'headers' => ['Company Name', 'TRADE RECEIVABLES'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'TRADE RECEIVABLES' => '20',
+                    ]],
+                ]);
+        });
+
+        $this->post(route('document-generator.batches.store'), [
+            'excel_file' => UploadedFile::fake()->create('source.xlsx', 20),
+            'default_template_file' => $this->createDocxUploadedFile('default.docx', ['TRADE RECEIVABLES']),
+            'year_templates' => [
+                [
+                    'year' => 2025,
+                    'template_file' => $this->createDocxUploadedFile('2025.docx', ['TRADE RECEIVABLES 2025-TRADE RECEIVABLES']),
+                ],
+            ],
+        ], [
+            'Accept' => 'application/json',
+            'X-Requested-With' => 'XMLHttpRequest',
+        ])->assertCreated();
+
+        $item = DocumentBatchItem::query()->latest('id')->firstOrFail();
+        $this->assertSame('20', $item->row_data['TRADE RECEIVABLES'] ?? null);
+
+        $pdfService = Mockery::mock(PdfConversionService::class);
+        $pdfService->shouldReceive('convertDocxToPdf')
+            ->once()
+            ->andReturnUsing(function (string $docxPath): string {
+                $pdfPath = preg_replace('/\.docx$/', '.pdf', $docxPath);
+                file_put_contents((string) $pdfPath, 'pdf-content');
+
+                return (string) $pdfPath;
+            });
+
+        (new GenerateDocumentBatchItemJob($item->id))->handle(
+            app(\App\Services\DocumentBatchActivityLogger::class),
+            app(DocxTemplateService::class),
+            $pdfService,
+        );
+
+        $item->refresh();
+
+        $this->assertSame('pdf_done', $item->status);
+        $this->assertNotNull($item->docx_path);
+        $this->assertStringContainsString(
+            '100.00',
+            $this->readDocxDocumentXml(Storage::disk('local')->path((string) $item->docx_path))
+        );
+    }
+
+    public function test_job_treats_plain_current_header_as_2025_value_for_auto_sum_placeholder(): void
+    {
+        Storage::fake('local');
+
+        $user = User::factory()->create();
+
+        $previousBatch = DocumentBatch::factory()->for($user)->create([
+            'excel_path' => "document-generator/{$user->id}/uploads/previous.xlsx",
+        ]);
+        Storage::disk('local')->put((string) $previousBatch->excel_path, 'previous-workbook');
+
+        $batch = $this->createBatchWithDocxTemplate([
+            'NET INCOME',
+        ], $user);
+        $this->addYearDocxTemplateToBatch($batch, 2025, [
+            'NET INCOME',
+        ], 'template-2025.docx');
+
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 2,
+            'row_data' => [
+                'Company Name' => 'Acme Corp',
+                'NET INCOME' => '30',
+                'SEC REGISTRATION DATE' => '7/23/2025 00:00:00',
+            ],
+            'status' => 'queued',
+        ]);
+
+        $this->mock(ExcelExtractionService::class, function ($mock): void {
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->andReturn([
+                    'headers' => ['Company Name', 'NET INCOME'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'NET INCOME' => '20',
+                    ]],
+                ]);
+        });
+
+        $pdfService = Mockery::mock(PdfConversionService::class);
+        $pdfService->shouldReceive('convertDocxToPdf')
+            ->once()
+            ->andReturnUsing(function (string $docxPath): string {
+                $pdfPath = preg_replace('/\.docx$/', '.pdf', $docxPath);
+                file_put_contents((string) $pdfPath, 'pdf-content');
+
+                return (string) $pdfPath;
+            });
+
+        (new GenerateDocumentBatchItemJob($item->id))->handle(
+            app(\App\Services\DocumentBatchActivityLogger::class),
+            app(DocxTemplateService::class),
+            $pdfService,
+        );
+
+        $item->refresh();
+
+        $this->assertSame('pdf_done', $item->status);
+        $this->assertNotNull($item->docx_path);
+        $this->assertStringContainsString(
+            '50.00',
+            $this->readDocxDocumentXml(Storage::disk('local')->path((string) $item->docx_path))
+        );
+    }
+
+    public function test_job_treats_plain_current_header_as_2025_value_for_subtraction_placeholder(): void
+    {
+        Storage::fake('local');
+
+        $user = User::factory()->create();
+
+        $previousBatch = DocumentBatch::factory()->for($user)->create([
+            'excel_path' => "document-generator/{$user->id}/uploads/previous.xlsx",
+        ]);
+        Storage::disk('local')->put((string) $previousBatch->excel_path, 'previous-workbook');
+
+        $batch = $this->createBatchWithDocxTemplate([
+            'TRADE RECEIVABLES',
+        ], $user);
+        $this->addYearDocxTemplateToBatch($batch, 2025, [
+            'TRADE RECEIVABLES 2025-TRADE RECEIVABLES',
+        ], 'template-2025.docx');
+
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 2,
+            'row_data' => [
+                'Company Name' => 'Acme Corp',
+                'TRADE RECEIVABLES' => '120',
+                'SEC REGISTRATION DATE' => '7/23/2025 00:00:00',
+            ],
+            'status' => 'queued',
+        ]);
+
+        $this->mock(ExcelExtractionService::class, function ($mock): void {
+            $mock
+                ->shouldReceive('extract')
+                ->once()
+                ->with(Mockery::type('string'), 0)
+                ->andReturn([
+                    'headers' => ['Company Name', 'TRADE RECEIVABLES'],
+                    'rows' => [[
+                        'Company Name' => 'Acme Corp',
+                        'TRADE RECEIVABLES' => '20',
+                    ]],
+                ]);
+        });
+
+        $pdfService = Mockery::mock(PdfConversionService::class);
+        $pdfService->shouldReceive('convertDocxToPdf')
+            ->once()
+            ->andReturnUsing(function (string $docxPath): string {
+                $pdfPath = preg_replace('/\.docx$/', '.pdf', $docxPath);
+                file_put_contents((string) $pdfPath, 'pdf-content');
+
+                return (string) $pdfPath;
+            });
+
+        (new GenerateDocumentBatchItemJob($item->id))->handle(
+            app(\App\Services\DocumentBatchActivityLogger::class),
+            app(DocxTemplateService::class),
+            $pdfService,
+        );
+
+        $item->refresh();
+
+        $this->assertSame('pdf_done', $item->status);
+        $this->assertNotNull($item->docx_path);
+        $this->assertStringContainsString(
+            '100.00',
+            $this->readDocxDocumentXml(Storage::disk('local')->path((string) $item->docx_path))
+        );
     }
 
     public function test_editing_a_failed_row_regenerates_it_and_records_logs(): void
@@ -767,10 +1459,11 @@ class DocumentGeneratorTest extends TestCase
             ->once()
             ->andReturn([
                 'missing_data' => [],
+                'errors' => [],
             ]);
         $docxService->shouldReceive('render')
             ->once()
-            ->andReturnUsing(function (string $templatePath, string $outputPath): void {
+            ->andReturnUsing(function (string $templatePath, string $outputPath, array $rowData = [], ?int $selectedTemplateYear = null): void {
                 file_put_contents($outputPath, 'docx-content');
             });
 
@@ -929,16 +1622,16 @@ class DocumentGeneratorTest extends TestCase
         $docxService = Mockery::mock(DocxTemplateService::class);
         $docxService->shouldReceive('validateRowData')
             ->once()
-            ->withArgs(function (string $templatePath): bool {
+            ->withArgs(function (string $templatePath, ...$args): bool {
                 return str_ends_with($templatePath, 'document-generator/template.docx');
             })
-            ->andReturn(['missing_data' => []]);
+            ->andReturn(['missing_data' => [], 'errors' => []]);
         $docxService->shouldReceive('render')
             ->once()
-            ->withArgs(function (string $templatePath): bool {
+            ->withArgs(function (string $templatePath, string $outputPath, array $rowData, ?int $selectedTemplateYear = null): bool {
                 return str_ends_with($templatePath, 'document-generator/template.docx');
-            }, Mockery::type('string'), Mockery::type('array'))
-            ->andReturnUsing(function (string $templatePath, string $outputPath): void {
+            })
+            ->andReturnUsing(function (string $templatePath, string $outputPath, array $rowData = [], ?int $selectedTemplateYear = null): void {
                 file_put_contents($outputPath, 'docx-content');
             });
 
@@ -984,18 +1677,22 @@ class DocumentGeneratorTest extends TestCase
             ]);
 
             $docxService = Mockery::mock(DocxTemplateService::class);
+            $docxService->shouldReceive('placeholderKeys')
+                ->once()
+                ->with(Mockery::on(static fn (string $templatePath): bool => str_ends_with($templatePath, 'document-generator/template-2025.docx')))
+                ->andReturn([]);
             $docxService->shouldReceive('validateRowData')
                 ->once()
-                ->withArgs(function (string $templatePath): bool {
+                ->withArgs(function (string $templatePath, ...$args): bool {
                     return str_ends_with($templatePath, 'document-generator/template-2025.docx');
                 })
-                ->andReturn(['missing_data' => []]);
+                ->andReturn(['missing_data' => [], 'errors' => []]);
             $docxService->shouldReceive('render')
                 ->once()
-                ->withArgs(function (string $templatePath): bool {
+                ->withArgs(function (string $templatePath, string $outputPath, array $rowData, ?int $selectedTemplateYear = null): bool {
                     return str_ends_with($templatePath, 'document-generator/template-2025.docx');
-                }, Mockery::type('string'), Mockery::type('array'))
-                ->andReturnUsing(function (string $templatePath, string $outputPath): void {
+                })
+                ->andReturnUsing(function (string $templatePath, string $outputPath, array $rowData = [], ?int $selectedTemplateYear = null): void {
                     file_put_contents($outputPath, 'docx-content');
                 });
 
@@ -1041,18 +1738,22 @@ class DocumentGeneratorTest extends TestCase
         ]);
 
         $docxService = Mockery::mock(DocxTemplateService::class);
+        $docxService->shouldReceive('placeholderKeys')
+            ->once()
+            ->with(Mockery::on(static fn (string $templatePath): bool => str_ends_with($templatePath, 'document-generator/template-2025.docx')))
+            ->andReturn([]);
         $docxService->shouldReceive('validateRowData')
             ->once()
-            ->withArgs(function (string $templatePath): bool {
+            ->withArgs(function (string $templatePath, ...$args): bool {
                 return str_ends_with($templatePath, 'document-generator/template-2025.docx');
             })
-            ->andReturn(['missing_data' => []]);
+            ->andReturn(['missing_data' => [], 'errors' => []]);
         $docxService->shouldReceive('render')
             ->once()
-            ->withArgs(function (string $templatePath): bool {
+            ->withArgs(function (string $templatePath, string $outputPath, array $rowData, ?int $selectedTemplateYear = null): bool {
                 return str_ends_with($templatePath, 'document-generator/template-2025.docx');
-            }, Mockery::type('string'), Mockery::type('array'))
-            ->andReturnUsing(function (string $templatePath, string $outputPath): void {
+            })
+            ->andReturnUsing(function (string $templatePath, string $outputPath, array $rowData = [], ?int $selectedTemplateYear = null): void {
                 file_put_contents($outputPath, 'docx-content');
             });
 
@@ -1104,18 +1805,22 @@ class DocumentGeneratorTest extends TestCase
         ]);
 
         $docxService = Mockery::mock(DocxTemplateService::class);
+        $docxService->shouldReceive('placeholderKeys')
+            ->once()
+            ->with(Mockery::on(static fn (string $templatePath): bool => str_ends_with($templatePath, 'document-generator/template-2025.docx')))
+            ->andReturn([]);
         $docxService->shouldReceive('validateRowData')
             ->once()
-            ->withArgs(function (string $templatePath): bool {
+            ->withArgs(function (string $templatePath, ...$args): bool {
                 return str_ends_with($templatePath, 'document-generator/template-2025.docx');
             })
-            ->andReturn(['missing_data' => []]);
+            ->andReturn(['missing_data' => [], 'errors' => []]);
         $docxService->shouldReceive('render')
             ->once()
-            ->withArgs(function (string $templatePath): bool {
+            ->withArgs(function (string $templatePath, string $outputPath, array $rowData, ?int $selectedTemplateYear = null): bool {
                 return str_ends_with($templatePath, 'document-generator/template-2025.docx');
-            }, Mockery::type('string'), Mockery::type('array'))
-            ->andReturnUsing(function (string $templatePath, string $outputPath): void {
+            })
+            ->andReturnUsing(function (string $templatePath, string $outputPath, array $rowData = [], ?int $selectedTemplateYear = null): void {
                 file_put_contents($outputPath, 'docx-content');
             });
 
@@ -1171,10 +1876,14 @@ class DocumentGeneratorTest extends TestCase
             ]);
 
             $docxService = Mockery::mock(DocxTemplateService::class);
-            $docxService->shouldReceive('validateRowData')->once()->andReturn(['missing_data' => []]);
+            $docxService->shouldReceive('placeholderKeys')
+                ->once()
+                ->with(Mockery::on(static fn (string $templatePath): bool => str_ends_with($templatePath, 'document-generator/template-2025.docx')))
+                ->andReturn([]);
+            $docxService->shouldReceive('validateRowData')->once()->andReturn(['missing_data' => [], 'errors' => []]);
             $docxService->shouldReceive('render')
                 ->once()
-                ->andReturnUsing(function (string $templatePath, string $outputPath): void {
+                ->andReturnUsing(function (string $templatePath, string $outputPath, array $rowData = [], ?int $selectedTemplateYear = null): void {
                     file_put_contents($outputPath, 'docx-content');
                 });
 
@@ -1354,5 +2063,95 @@ class DocumentGeneratorTest extends TestCase
         ]);
 
         return $batch;
+    }
+
+    /**
+     * @param  list<string>  $placeholders
+     */
+    private function createBatchWithDocxTemplate(array $placeholders, ?User $owner = null, array $attributes = []): DocumentBatch
+    {
+        Storage::disk('local')->makeDirectory('document-generator');
+        $this->writeDocxTemplate(Storage::disk('local')->path('document-generator/template.docx'), $placeholders);
+
+        $batch = DocumentBatch::factory()->for($owner ?? User::factory())->create(array_merge([
+            'template_path' => 'document-generator/template.docx',
+            'status' => 'queued',
+            'total_items' => 1,
+            'processed_items' => 0,
+            'success_items' => 0,
+            'failed_items' => 0,
+        ], $attributes));
+
+        DocumentBatchTemplate::factory()->create([
+            'document_batch_id' => $batch->id,
+            'year' => null,
+            'template_name' => $batch->template_name,
+            'template_path' => $batch->template_path,
+        ]);
+
+        return $batch;
+    }
+
+    /**
+     * @param  list<string>  $placeholders
+     */
+    private function addYearDocxTemplateToBatch(DocumentBatch $batch, int $year, array $placeholders, string $filename): DocumentBatchTemplate
+    {
+        $path = "document-generator/{$filename}";
+        $this->writeDocxTemplate(Storage::disk('local')->path($path), $placeholders);
+
+        return DocumentBatchTemplate::factory()->create([
+            'document_batch_id' => $batch->id,
+            'year' => $year,
+            'template_name' => $filename,
+            'template_path' => $path,
+        ]);
+    }
+
+    /**
+     * @param  list<string>  $placeholders
+     */
+    private function writeDocxTemplate(string $path, array $placeholders): void
+    {
+        $phpWord = new PhpWord;
+        $section = $phpWord->addSection();
+
+        foreach ($placeholders as $placeholder) {
+            $section->addText('{'.$placeholder.'}');
+        }
+
+        WordIOFactory::createWriter($phpWord, 'Word2007')->save($path);
+    }
+
+    /**
+     * @param  list<string>  $placeholders
+     */
+    private function createDocxUploadedFile(string $filename, array $placeholders): UploadedFile
+    {
+        $path = sys_get_temp_dir().DIRECTORY_SEPARATOR.uniqid('docx-upload-', true).'-'.$filename;
+        $this->writeDocxTemplate($path, $placeholders);
+
+        return new UploadedFile(
+            $path,
+            $filename,
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            null,
+            true
+        );
+    }
+
+    private function readDocxDocumentXml(string $path): string
+    {
+        $zip = new ZipArchive;
+        $result = $zip->open($path);
+
+        $this->assertTrue($result === true, 'The generated DOCX file could not be opened.');
+
+        $contents = $zip->getFromName('word/document.xml');
+        $zip->close();
+
+        $this->assertIsString($contents);
+
+        return $contents;
     }
 }

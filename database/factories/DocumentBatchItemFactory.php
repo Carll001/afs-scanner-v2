@@ -26,6 +26,7 @@ class DocumentBatchItemFactory extends Factory
             'docx_path' => null,
             'pdf_path' => null,
             'error_message' => null,
+            'error_details' => null,
             'started_at' => null,
             'completed_at' => null,
         ];

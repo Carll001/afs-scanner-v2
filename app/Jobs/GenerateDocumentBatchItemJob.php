@@ -5,9 +5,9 @@ namespace App\Jobs;
 use App\Models\DocumentBatch;
 use App\Models\DocumentBatchItem;
 use App\Models\DocumentBatchTemplate;
-use App\Models\User;
 use App\Services\DocumentBatchActivityLogger;
 use App\Services\DocxTemplateService;
+use App\Services\ExcelExtractionService;
 use App\Services\PdfConversionService;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -29,8 +29,11 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
     public function handle(
         DocumentBatchActivityLogger $activityLogger,
         DocxTemplateService $docxTemplateService,
-        PdfConversionService $pdfConversionService
+        PdfConversionService $pdfConversionService,
+        ?ExcelExtractionService $excelExtractionService = null
     ): void {
+        $excelExtractionService ??= app(ExcelExtractionService::class);
+
         $item = DocumentBatchItem::with('batch.templates')->find($this->documentBatchItemId);
         if (! $item instanceof DocumentBatchItem) {
             return;
@@ -56,13 +59,30 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
 
             /** @var array<string, string> $rowData */
             $rowData = $item->row_data ?? [];
-            $templatePath = $this->resolveTemplatePath($batch, $rowData);
+            $template = $this->resolveTemplateForRow($batch, $rowData);
+            $templatePath = Storage::disk('local')->path($template->template_path);
             $docxPath = Storage::disk('local')->path($docxRelativePath);
+            $templateRowData = $this->buildTemplateRowData(
+                $batch,
+                $rowData,
+                $templatePath,
+                $template->year,
+                $docxTemplateService,
+                $excelExtractionService
+            );
 
-            $validation = $docxTemplateService->validateRowData($templatePath, $rowData);
-            if ($validation['missing_data'] !== []) {
-                $errorMessage = 'Missing data: '.implode(', ', $validation['missing_data']);
-                $this->markItemFinal($item->id, false, null, null, $errorMessage);
+            $validation = $docxTemplateService->validateRowData($templatePath, $templateRowData, $template->year);
+            $validationErrors = [];
+            if (($validation['missing_data'] ?? []) !== []) {
+                $validationErrors[] = 'Missing data: '.implode(', ', $validation['missing_data']);
+            }
+            if (($validation['errors'] ?? []) !== []) {
+                array_push($validationErrors, ...$validation['errors']);
+            }
+
+            if ($validationErrors !== []) {
+                $errorMessage = implode(' ', $validationErrors);
+                $this->markItemFinal($item->id, false, null, null, $errorMessage, $validation);
                 $failedItem = DocumentBatchItem::query()->find($item->id);
 
                 if ($failedItem instanceof DocumentBatchItem) {
@@ -79,7 +99,7 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
                 return;
             }
 
-            $docxTemplateService->render($templatePath, $docxPath, $rowData);
+            $docxTemplateService->render($templatePath, $docxPath, $templateRowData, $template->year);
 
             $this->markDocxDone($item->id, $docxRelativePath);
 
@@ -107,7 +127,8 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
                 false,
                 $item->docx_path,
                 null,
-                mb_substr($exception->getMessage(), 0, 2000)
+                mb_substr($exception->getMessage(), 0, 2000),
+                null
             );
 
             $batch = $item->batch;
@@ -140,9 +161,226 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
     }
 
     /**
-     * @param array<string, string> $rowData
+     * @param  array<string, string>  $rowData
+     * @return array<string, string>
      */
-    private function resolveTemplatePath(DocumentBatch $batch, array $rowData): string
+    private function buildTemplateRowData(
+        DocumentBatch $batch,
+        array $rowData,
+        string $templatePath,
+        ?int $selectedTemplateYear,
+        DocxTemplateService $docxTemplateService,
+        ExcelExtractionService $excelExtractionService
+    ): array {
+        if ($selectedTemplateYear !== 2025) {
+            return $rowData;
+        }
+
+        $templateRowData = $rowData;
+        $previousRowData = $this->findPreviousWorkbookRow($batch, $rowData, $excelExtractionService);
+
+        foreach ($docxTemplateService->placeholderKeys($templatePath) as $placeholder) {
+            $placeholder = trim($placeholder);
+            if ($placeholder === '') {
+                continue;
+            }
+
+            $subtractionOperands = $this->parseSubtractionPlaceholder($placeholder);
+            if ($subtractionOperands !== null) {
+                $hasDirectCurrentYearHeader = $this->hasNormalizedHeader($rowData, $subtractionOperands['left_operand']);
+                $currentValue = $this->findCurrentYearValue($rowData, $subtractionOperands['left_operand']);
+                if ($currentValue !== null && $this->isNumericValue($currentValue)) {
+                    $templateRowData[$subtractionOperands['left_operand']] = $currentValue;
+                }
+
+                $previousValue = $this->findPreviousValue($previousRowData, $subtractionOperands['right_operand']);
+                if ($previousValue === null && $hasDirectCurrentYearHeader) {
+                    $previousValue = $this->findFirstNormalizedValue($rowData, $subtractionOperands['right_operand']);
+                }
+
+                if ($previousValue !== null) {
+                    $templateRowData[$subtractionOperands['right_operand']] = $previousValue;
+                } elseif ($currentValue !== null && $this->isNumericValue($currentValue)) {
+                    $templateRowData[$subtractionOperands['right_operand']] = '';
+                }
+
+                continue;
+            }
+
+            $currentYearOperand = "{$placeholder} 2025";
+            $hasDirectCurrentYearHeader = $this->hasNormalizedHeader($rowData, $currentYearOperand);
+            $currentValue = $this->findCurrentYearValue($rowData, $currentYearOperand);
+            if ($currentValue === null || ! $this->isNumericValue($currentValue)) {
+                continue;
+            }
+
+            $templateRowData[$currentYearOperand] = $currentValue;
+
+            $previousValue = $this->findPreviousValue($previousRowData, $placeholder);
+            if ($previousValue === null && $hasDirectCurrentYearHeader) {
+                $previousValue = $this->findFirstNormalizedValue($rowData, $placeholder);
+            }
+
+            $templateRowData[$placeholder] = $previousValue ?? '';
+        }
+
+        return $templateRowData;
+    }
+
+    /**
+     * @param  array<string, string>  $rowData
+     * @return array<string, string>|null
+     */
+    private function findPreviousWorkbookRow(
+        DocumentBatch $batch,
+        array $rowData,
+        ExcelExtractionService $excelExtractionService
+    ): ?array {
+        $company = trim($this->extractCompanyFromRowData($rowData));
+        if ($company === '') {
+            return null;
+        }
+
+        $previousBatch = DocumentBatch::query()
+            ->where('user_id', $batch->user_id)
+            ->where('id', '<', $batch->id)
+            ->whereNotNull('excel_path')
+            ->latest('id')
+            ->first();
+
+        if (! $previousBatch instanceof DocumentBatch || ! is_string($previousBatch->excel_path)) {
+            return null;
+        }
+
+        if (! Storage::disk('local')->exists($previousBatch->excel_path)) {
+            return null;
+        }
+
+        $rows = $excelExtractionService->extract(Storage::disk('local')->path($previousBatch->excel_path), 0)['rows'];
+        foreach ($rows as $previousRowData) {
+            if (trim($this->extractCompanyFromRowData($previousRowData)) === $company) {
+                return $previousRowData;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @return array{left_operand: string, right_operand: string}|null
+     */
+    private function parseSubtractionPlaceholder(string $placeholder): ?array
+    {
+        if (substr_count($placeholder, '-') !== 1) {
+            return null;
+        }
+
+        [$leftOperand, $rightOperand] = array_map('trim', explode('-', $placeholder, 2));
+        if ($leftOperand === '' || $rightOperand === '') {
+            return null;
+        }
+
+        return [
+            'left_operand' => $leftOperand,
+            'right_operand' => $rightOperand,
+        ];
+    }
+
+    /**
+     * @param  array<string, string>  $rowData
+     */
+    private function findCurrentYearValue(array $rowData, string $operand): ?string
+    {
+        $directValue = $this->findFirstNormalizedValue($rowData, $operand);
+        if ($directValue !== null) {
+            return $directValue;
+        }
+
+        if (! preg_match('/^(?<base>.+?)\s2025$/', trim($operand), $matches)) {
+            return null;
+        }
+
+        $baseOperand = trim((string) ($matches['base'] ?? ''));
+        if ($baseOperand === '') {
+            return null;
+        }
+
+        return $this->findFirstNormalizedValue($rowData, $baseOperand);
+    }
+
+    /**
+     * @param  array<string, string>  $rowData
+     */
+    private function hasNormalizedHeader(array $rowData, string $header): bool
+    {
+        return $this->findFirstNormalizedValue($rowData, $header) !== null;
+    }
+
+    /**
+     * @param  array<string, string>|null  $rowData
+     */
+    private function findPreviousValue(?array $rowData, string $operand): ?string
+    {
+        if ($rowData === null) {
+            return null;
+        }
+
+        return $this->findFirstNormalizedValue($rowData, $operand);
+    }
+
+    /**
+     * @param  array<string, string>  $rowData
+     */
+    private function findFirstNormalizedValue(array $rowData, string $header): ?string
+    {
+        $normalizedHeader = $this->normalizeHeader($header);
+
+        foreach ($rowData as $key => $value) {
+            if ($this->normalizeHeader($key) === $normalizedHeader) {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<string, string>  $rowData
+     */
+    private function extractCompanyFromRowData(array $rowData): string
+    {
+        $fallback = '';
+
+        foreach ($rowData as $key => $value) {
+            $normalizedKey = preg_replace('/[^a-z0-9]+/', '', mb_strtolower($key)) ?? '';
+            $stringValue = trim($value);
+
+            if ($normalizedKey === 'company') {
+                return $stringValue;
+            }
+
+            if ($fallback === '' && str_contains($normalizedKey, 'company')) {
+                $fallback = $stringValue;
+            }
+        }
+
+        return $fallback;
+    }
+
+    private function isNumericValue(string $value): bool
+    {
+        $trimmed = trim($value);
+        if ($trimmed === '') {
+            return false;
+        }
+
+        return is_numeric(str_replace([',', ' '], '', $trimmed));
+    }
+
+    /**
+     * @param  array<string, string>  $rowData
+     */
+    private function resolveTemplateForRow(DocumentBatch $batch, array $rowData): DocumentBatchTemplate
     {
         $year = $this->extractRegistrationYear($rowData);
         if ($year === null) {
@@ -160,7 +398,7 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
             throw new \RuntimeException("Template file is missing for year {$year}.");
         }
 
-        return Storage::disk('local')->path($template->template_path);
+        return $template;
     }
 
     private function resolveTemplate(DocumentBatch $batch, int $rowYear): ?DocumentBatchTemplate
@@ -180,7 +418,7 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
     }
 
     /**
-     * @param array<string, string> $rowData
+     * @param  array<string, string>  $rowData
      */
     private function extractRegistrationYear(array $rowData): ?int
     {
@@ -313,8 +551,15 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
 
     private function normalizeHeader(string $header): string
     {
-        $normalized = mb_strtolower(trim($header));
-        $normalized = preg_replace('/[^a-z0-9]+/', '_', $normalized) ?? $normalized;
+        $normalized = strtr(trim($header), [
+            "\u{00A0}" => ' ',
+            "\u{2018}" => "'",
+            "\u{2019}" => "'",
+            "\u{201C}" => '"',
+            "\u{201D}" => '"',
+        ]);
+        $normalized = mb_strtolower($normalized);
+        $normalized = preg_replace('/[^\pL\pN]+/u', '_', $normalized) ?? $normalized;
 
         return trim($normalized, '_');
     }
@@ -369,9 +614,10 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
         bool $isSuccess,
         ?string $docxPath,
         ?string $pdfPath,
-        ?string $errorMessage = null
+        ?string $errorMessage = null,
+        ?array $errorDetails = null
     ): void {
-        DB::transaction(function () use ($itemId, $isSuccess, $docxPath, $pdfPath, $errorMessage): void {
+        DB::transaction(function () use ($itemId, $isSuccess, $docxPath, $pdfPath, $errorMessage, $errorDetails): void {
             $item = DocumentBatchItem::query()->lockForUpdate()->find($itemId);
             if (! $item instanceof DocumentBatchItem) {
                 return;
@@ -385,6 +631,7 @@ class GenerateDocumentBatchItemJob implements ShouldQueue
             $item->docx_path = $docxPath;
             $item->pdf_path = $pdfPath;
             $item->error_message = $errorMessage;
+            $item->error_details = $errorDetails;
             $item->completed_at = now();
             $item->save();
 

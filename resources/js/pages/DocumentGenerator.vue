@@ -95,7 +95,6 @@ const breadcrumbs: BreadcrumbItem[] = [
 
 const excelFile = ref<File | null>(null);
 const defaultTemplateFile = ref<File | null>(null);
-const sheetIndex = ref('0');
 const createErrors = ref<Record<string, string[]>>({});
 const createErrorMessage = ref<string | null>(null);
 const creatingBatch = ref(false);
@@ -289,7 +288,6 @@ const postBatch = async () => {
         if (defaultTemplateFile.value) {
             formData.append('default_template_file', defaultTemplateFile.value);
         }
-        formData.append('sheet_index', sheetIndex.value || '0');
 
         const response = await fetch(documentGeneratorRoutes.batches.store.url(), {
             method: 'POST',
@@ -861,7 +859,7 @@ onBeforeUnmount(() => {
                 </CardHeader>
                 <CardContent>
                     <form class="space-y-4" @submit.prevent="postBatch">
-                        <div class="grid gap-4 md:grid-cols-3">
+                        <div class="grid gap-4 md:grid-cols-2">
                             <div class="grid gap-2">
                                 <Label for="excel">Excel File</Label>
                                 <Input id="excel" type="file" accept=".xls,.xlsx" @change="onExcelFileChange" />
@@ -879,11 +877,17 @@ onBeforeUnmount(() => {
                                 <p class="text-xs text-muted-foreground">
                                     Optional if a global default is already set in Template Mapping.
                                 </p>
-                            </div>
-
-                            <div class="grid gap-2">
-                                <Label for="sheet-index">Sheet Index</Label>
-                                <Input id="sheet-index" v-model="sheetIndex" type="number" min="0" />
+                                <p class="text-xs text-muted-foreground">
+                                    The first worksheet is always used, and the latest earlier workbook you uploaded is
+                                    checked automatically for matching company rows.
+                                </p>
+                                <p class="text-xs text-muted-foreground">
+                                    In the 2025 template, placeholders like
+                                    <code>{NET INCOME}</code> treat the current file value as 2025 and add the matched
+                                    old-file base value, and
+                                    subtraction stays explicit, such as
+                                    <code>{TRADE RECEIVABLES 2025-TRADE RECEIVABLES}</code>.
+                                </p>
                             </div>
                         </div>
 
