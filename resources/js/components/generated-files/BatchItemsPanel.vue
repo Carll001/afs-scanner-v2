@@ -6,6 +6,7 @@ import {
     Loader2,
     MoreVertical,
     Pencil,
+    PenLine,
     Printer,
 } from 'lucide-vue-next';
 import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
@@ -78,6 +79,8 @@ type BatchItem = {
     row_data: Record<string, string>;
     docx_available: boolean;
     pdf_available: boolean;
+    signature_applied: boolean;
+    signature_applied_at: string | null;
     error_message: string | null;
     error_details: {
         missing_data?: string[];
@@ -129,6 +132,7 @@ const itemsLoading = ref(false);
 const itemsSortBy = ref('row_number');
 const itemsSortDirection = ref<SortDirection>('asc');
 const itemStatusFilter = ref('all');
+const itemSignatureFilter = ref('all');
 const companySearch = ref('');
 const pollingActive = ref(false);
 
@@ -144,6 +148,9 @@ const pendingDeleteItem = ref<BatchItem | null>(null);
 const errorDetailsDialogOpen = ref(false);
 const selectedErrorItem = ref<BatchItem | null>(null);
 const regeneratingItemIds = ref<number[]>([]);
+const selectedItemIds = ref<number[]>([]);
+const signingItemIds = ref<number[]>([]);
+const signingBulk = ref(false);
 
 let companySearchDebounce: ReturnType<typeof setTimeout> | null = null;
 let pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -233,6 +240,34 @@ const sendDelete = async (url: string): Promise<void> => {
     }
 };
 
+const sendPostJson = async <T,>(url: string, payload: unknown): Promise<T> => {
+    const response = await fetch(url, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-XSRF-TOKEN': csrfToken(),
+        },
+        body: JSON.stringify(payload),
+    });
+
+    if (response.status === 422) {
+        const errorPayload = (await response.json()) as {
+            errors?: Record<string, string[]>;
+            message?: string;
+        };
+        throw new Error(errorPayload.message ?? 'Validation failed.');
+    }
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+    }
+
+    return (await response.json()) as T;
+};
+
 const loadBatchProgress = async () => {
     batchProgress.value = await getApi<BatchProgress>(
         documentGeneratorRoutes.batches.progress.url({
@@ -255,6 +290,9 @@ const loadBatchItems = async (page = itemsData.value.current_page) => {
         if (itemStatusFilter.value !== 'all') {
             query.status = itemStatusFilter.value;
         }
+        if (itemSignatureFilter.value !== 'all') {
+            query.signature_filter = itemSignatureFilter.value;
+        }
         if (companySearch.value.trim() !== '') {
             query.company_search = companySearch.value.trim();
         }
@@ -266,6 +304,9 @@ const loadBatchItems = async (page = itemsData.value.current_page) => {
                     query,
                 },
             ),
+        );
+        selectedItemIds.value = selectedItemIds.value.filter((itemId) =>
+            itemsData.value.data.some((item) => item.id === itemId),
         );
 
         reconcileRegeneratingItems(itemsData.value.data);
@@ -295,6 +336,27 @@ const statusBadgeVariant = (
 
 const isItemRegenerating = (itemId: number) =>
     regeneratingItemIds.value.includes(itemId);
+const isItemSelected = (itemId: number) => selectedItemIds.value.includes(itemId);
+const isItemSigning = (itemId: number) => signingItemIds.value.includes(itemId);
+
+const selectableItems = computed(() => itemsData.value.data.filter((item) => item.pdf_available && !item.signature_applied));
+const allVisibleSelected = computed(
+    () => selectableItems.value.length > 0 && selectableItems.value.every((item) => isItemSelected(item.id)),
+);
+const selectedBulkTargets = computed(() =>
+    itemsData.value.data
+        .filter((item) => isItemSelected(item.id) && item.pdf_available && !item.signature_applied)
+        .map((item) => ({ batch_id: props.batch.id, item_id: item.id, row_number: item.row_number })),
+);
+const canBulkSign = computed(() => selectedBulkTargets.value.length > 0 && !signingBulk.value);
+const bulkSignButtonLabel = computed(() => {
+    if (signingBulk.value) {
+        return 'Applying...';
+    }
+
+    const countLabel = selectedBulkTargets.value.length > 0 ? ` (${selectedBulkTargets.value.length})` : '';
+    return `Add Signature (Bulk)${countLabel}`;
+});
 
 const canEditItem = (item: BatchItem) =>
     !isItemRegenerating(item.id) &&
@@ -417,6 +479,11 @@ const onItemStatusChange = async (value: string) => {
     await loadBatchItems(1);
 };
 
+const onItemSignatureFilterChange = async (value: string) => {
+    itemSignatureFilter.value = value;
+    await loadBatchItems(1);
+};
+
 const onCompanySearchInput = (event: Event) => {
     const target = event.target as HTMLInputElement;
     companySearch.value = target.value;
@@ -441,6 +508,8 @@ const optimisticQueueItem = (itemId: number, rowData: Record<string, string>) =>
                       status: 'queued',
                       docx_available: false,
                       pdf_available: false,
+                      signature_applied: false,
+                      signature_applied_at: null,
                       error_message: null,
                       error_details: null,
                       updated_at: new Date().toISOString(),
@@ -448,6 +517,108 @@ const optimisticQueueItem = (itemId: number, rowData: Record<string, string>) =>
                 : item,
         ),
     };
+};
+
+const toggleItemSelection = (itemId: number, checked: boolean) => {
+    selectedItemIds.value = checked
+        ? Array.from(new Set([...selectedItemIds.value, itemId]))
+        : selectedItemIds.value.filter((id) => id !== itemId);
+};
+
+const toggleAllVisibleSelection = (checked: boolean) => {
+    if (!checked) {
+        selectedItemIds.value = selectedItemIds.value.filter(
+            (id) => !selectableItems.value.some((item) => item.id === id),
+        );
+        return;
+    }
+
+    selectedItemIds.value = Array.from(
+        new Set([...selectedItemIds.value, ...selectableItems.value.map((item) => item.id)]),
+    );
+};
+
+const applySignatureToItem = async (item: BatchItem) => {
+    if (!item.pdf_available || item.signature_applied || isItemSigning(item.id)) {
+        return;
+    }
+
+    signingItemIds.value = [...signingItemIds.value, item.id];
+
+    try {
+        const payload = await sendPostJson<{
+            message: string;
+            item: BatchItem;
+            pdf_url: string;
+        }>(
+            documentGeneratorRoutes.batches.items.signature.url({
+                batch: props.batch.id,
+                item: item.id,
+            }),
+            {},
+        );
+
+        showNotice('success', 'Signature applied', `Row ${item.row_number} was signed.`);
+        await loadBatchItems(itemsData.value.current_page);
+
+        if (payload.pdf_url) {
+            window.open(payload.pdf_url, '_blank', 'noopener,noreferrer');
+        }
+    } catch (error) {
+        showNotice(
+            'error',
+            'Signature was not applied',
+            error instanceof Error ? error.message : 'Unable to apply signature.',
+        );
+    } finally {
+        signingItemIds.value = signingItemIds.value.filter((id) => id !== item.id);
+    }
+};
+
+const applySignatureBulk = async () => {
+    if (!canBulkSign.value) {
+        return;
+    }
+
+    signingBulk.value = true;
+
+    try {
+        const payload = await sendPostJson<{
+            results: Array<{ batch_id: number; item_id: number; success: boolean; message?: string }>;
+        }>(
+            documentGeneratorRoutes.items.signature.bulk.url(),
+            {
+                targets: selectedBulkTargets.value.map((target) => ({
+                    batch_id: target.batch_id,
+                    item_id: target.item_id,
+                })),
+            },
+        );
+
+        const successCount = payload.results.filter((result) => result.success).length;
+        const failedCount = payload.results.length - successCount;
+
+        if (failedCount === 0) {
+            showNotice('success', 'Bulk signature complete', `${successCount} file(s) signed.`);
+        } else {
+            showNotice(
+                'error',
+                'Bulk signature completed with errors',
+                `${successCount} signed, ${failedCount} failed. Please retry failed files one by one.`,
+            );
+        }
+
+        selectedItemIds.value = [];
+        await loadBatchItems(itemsData.value.current_page);
+    } catch (error) {
+        showNotice(
+            'error',
+            'Bulk signature failed',
+            error instanceof Error ? error.message : 'Unable to apply signatures.',
+        );
+    } finally {
+        signingBulk.value = false;
+    }
 };
 
 const summaryStats = computed(() => {
@@ -666,6 +837,29 @@ const extractSecRegistrationYear = (rowData: Record<string, string>) => {
 
 const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
     {
+        id: 'select',
+        header: () =>
+            h('input', {
+                type: 'checkbox',
+                checked: allVisibleSelected.value,
+                onChange: (event: Event) => {
+                    const target = event.target as HTMLInputElement;
+                    toggleAllVisibleSelection(target.checked);
+                },
+            }),
+        enableSorting: false,
+        cell: ({ row }) =>
+            h('input', {
+                type: 'checkbox',
+                disabled: !row.original.pdf_available || row.original.signature_applied,
+                checked: isItemSelected(row.original.id),
+                onChange: (event: Event) => {
+                    const target = event.target as HTMLInputElement;
+                    toggleItemSelection(row.original.id, target.checked);
+                },
+            }),
+    },
+    {
         id: 'row_number',
         accessorKey: 'row_number',
         header: 'Row',
@@ -710,6 +904,15 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
                                 ? 'regenerating'
                                 : row.original.status,
                     ),
+                    row.original.signature_applied
+                        ? h(
+                              Badge,
+                              {
+                                  variant: 'secondary',
+                              },
+                              () => 'Signed',
+                          )
+                        : null,
                 ],
             ),
     },
@@ -913,6 +1116,24 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
                                         h(
                                             DropdownMenuItem,
                                             {
+                                                disabled: !item.pdf_available || item.signature_applied || isItemSigning(item.id),
+                                                onSelect: (event: Event) => {
+                                                    event.preventDefault();
+                                                    void applySignatureToItem(item);
+                                                },
+                                            },
+                                            {
+                                                default: () => [
+                                                    h(PenLine, {
+                                                        class: 'size-4',
+                                                    }),
+                                                    h('span', item.signature_applied ? 'Signed' : isItemSigning(item.id) ? 'Signing...' : 'Add Signature'),
+                                                ],
+                                            },
+                                        ),
+                                        h(
+                                            DropdownMenuItem,
+                                            {
                                                 disabled: isItemRegenerating(item.id),
                                                 onSelect: (event: Event) => {
                                                     event.preventDefault();
@@ -981,32 +1202,17 @@ onBeforeUnmount(() => {
                 </div>
             </div>
 
-            <div class="grid gap-4 md:grid-cols-[220px_minmax(0,320px)]">
-                <div class="max-w-[220px]">
-                    <Label class="mb-2 block">Filter by status</Label>
-                    <Select
-                        :model-value="itemStatusFilter"
-                        @update:model-value="
-                            (value) => onItemStatusChange(String(value))
-                        "
-                    >
-                        <SelectTrigger>
-                            <SelectValue placeholder="All statuses" />
-                        </SelectTrigger>
-                        <SelectContent>
-                            <SelectItem value="all">All</SelectItem>
-                            <SelectItem value="queued">Queued</SelectItem>
-                            <SelectItem value="processing"
-                                >Processing</SelectItem
-                            >
-                            <SelectItem value="docx_done">Docx Done</SelectItem>
-                            <SelectItem value="pdf_done">Pdf Done</SelectItem>
-                            <SelectItem value="failed">Failed</SelectItem>
-                        </SelectContent>
-                    </Select>
-                </div>
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <p class="text-sm text-muted-foreground">
+                    Select PDF rows to apply signature in bulk.
+                </p>
+                <Button :disabled="!canBulkSign" @click="applySignatureBulk">
+                    {{ bulkSignButtonLabel }}
+                </Button>
+            </div>
 
-                <div class="max-w-[320px]">
+            <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div class="w-full max-w-[360px]">
                     <Label for="generated-company-search" class="mb-2 block"
                         >Search company</Label
                     >
@@ -1016,6 +1222,51 @@ onBeforeUnmount(() => {
                         placeholder="Type company name..."
                         @input="onCompanySearchInput"
                     />
+                </div>
+
+                <div class="flex w-full flex-wrap justify-start gap-3 lg:w-auto lg:justify-end">
+                    <div class="w-full min-w-[180px] sm:w-[220px]">
+                        <Label class="mb-2 block">Status</Label>
+                        <Select
+                            :model-value="itemStatusFilter"
+                            @update:model-value="
+                                (value) => onItemStatusChange(String(value))
+                            "
+                        >
+                            <SelectTrigger>
+                                <SelectValue placeholder="All statuses" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="all">All</SelectItem>
+                                <SelectItem value="queued">Queued</SelectItem>
+                                <SelectItem value="processing"
+                                    >Processing</SelectItem
+                                >
+                                <SelectItem value="docx_done">Docx Done</SelectItem>
+                                <SelectItem value="pdf_done">Pdf Done</SelectItem>
+                                <SelectItem value="failed">Failed</SelectItem>
+                            </SelectContent>
+                        </Select>
+                    </div>
+
+                    <div class="w-full min-w-[180px] sm:w-[220px]">
+                        <Label class="mb-2 block">Signature</Label>
+                        <Select
+                            :model-value="itemSignatureFilter"
+                            @update:model-value="
+                                (value) => onItemSignatureFilterChange(String(value))
+                            "
+                        >
+                            <SelectTrigger>
+                                <SelectValue placeholder="All signatures" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="all">All</SelectItem>
+                                <SelectItem value="signed">Signed</SelectItem>
+                                <SelectItem value="unsigned">Unsigned</SelectItem>
+                            </SelectContent>
+                        </Select>
+                    </div>
                 </div>
             </div>
 

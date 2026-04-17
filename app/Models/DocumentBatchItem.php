@@ -27,6 +27,7 @@ class DocumentBatchItem extends Model
         'error_details',
         'started_at',
         'completed_at',
+        'signature_applied_at',
     ];
 
     /**
@@ -39,6 +40,7 @@ class DocumentBatchItem extends Model
             'error_details' => 'array',
             'started_at' => 'datetime',
             'completed_at' => 'datetime',
+            'signature_applied_at' => 'datetime',
             'deleted_at' => 'datetime',
         ];
     }

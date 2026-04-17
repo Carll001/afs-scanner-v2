@@ -4,7 +4,6 @@ import {
     BookOpen,
     FileStack,
     FolderGit2,
-    FolderOpen,
     LayoutGrid,
 } from 'lucide-vue-next';
 import AppLogo from '@/components/AppLogo.vue';
@@ -34,11 +33,6 @@ const mainNavItems: NavItem[] = [
         title: 'Document Generator',
         href: documentGenerator.index(),
         icon: FileStack,
-    },
-    {
-        title: 'Generated Files',
-        href: '/generated-files',
-        icon: FolderOpen,
     },
 ];
 

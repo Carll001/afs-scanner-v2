@@ -6,10 +6,12 @@ use App\Jobs\GenerateDocumentBatchItemJob;
 use App\Models\DocumentBatch;
 use App\Models\DocumentBatchItem;
 use App\Models\DocumentBatchTemplate;
+use App\Models\DocumentGeneratorSignature;
 use App\Models\DocumentGeneratorTemplate;
 use App\Models\User;
 use App\Services\DocxTemplateService;
 use App\Services\ExcelExtractionService;
+use App\Services\PdfSignatureStampService;
 use App\Services\PdfConversionService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -29,6 +31,10 @@ class DocumentGeneratorTest extends TestCase
     {
         $this->get(route('document-generator.index'))->assertRedirect(route('login'));
         $this->get(route('generated-files.index'))->assertRedirect(route('login'));
+        $this->get(route('document-generator.items'))->assertRedirect(route('login'));
+        $this->get(route('document-generator.signature.show'))->assertRedirect(route('login'));
+        $this->post(route('document-generator.signature.store'))->assertRedirect(route('login'));
+        $this->delete(route('document-generator.signature.destroy'))->assertRedirect(route('login'));
         $this->post(route('document-generator.batches.store'))->assertRedirect(route('login'));
     }
 
@@ -430,6 +436,12 @@ class DocumentGeneratorTest extends TestCase
             'status' => 'completed',
             'success_items' => 1,
         ]);
+        DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'pdf_done',
+            'docx_path' => "document-generator/{$user->id}/batch-{$batch->id}/row-2.docx",
+            'pdf_path' => "document-generator/{$user->id}/batch-{$batch->id}/row-2.pdf",
+        ]);
 
         $this->actingAs($user);
 
@@ -507,7 +519,84 @@ class DocumentGeneratorTest extends TestCase
             ->get(route('document-generator.index'))
             ->assertOk()
             ->assertSee('/document-generator/template-mapping')
+            ->assertSee('/generated-files')
+            ->assertSee('Generated Files')
+            ->assertSee('Signature Settings')
             ->assertSee('Template Mapping');
+    }
+
+    public function test_authenticated_user_can_store_view_and_delete_signature_settings(): void
+    {
+        Storage::fake('local');
+
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $this->post(route('document-generator.signature.store'), [
+            'signature_file' => UploadedFile::fake()->image('signature.png', 300, 120),
+            'page2_anchor' => 'bottom_right',
+            'page2_offset_x' => 10,
+            'page2_offset_y' => 5,
+            'page2_width' => 45,
+            'page2_height' => 20,
+            'page3_anchor' => 'top_left',
+            'page3_offset_x' => 4,
+            'page3_offset_y' => 6,
+            'page3_width' => 42,
+            'page3_height' => 18,
+        ], [
+            'Accept' => 'application/json',
+            'X-Requested-With' => 'XMLHttpRequest',
+        ])
+            ->assertOk()
+            ->assertJsonPath('signature.page2.anchor', 'bottom_right')
+            ->assertJsonPath('signature.page2.width', 45.0)
+            ->assertJsonPath('signature.page3.anchor', 'top_left')
+            ->assertJsonPath('signature.page3.height', 18.0);
+
+        $signature = DocumentGeneratorSignature::query()
+            ->where('user_id', $user->id)
+            ->firstOrFail();
+
+        $this->assertNotNull($signature->original_signature_path);
+        Storage::disk('local')->assertExists($signature->processed_signature_path);
+
+        $this->getJson(route('document-generator.signature.show'))
+            ->assertOk()
+            ->assertJsonPath('signature.page2.anchor', 'bottom_right')
+            ->assertJsonPath('signature.page3.anchor', 'top_left');
+
+        $this->deleteJson(route('document-generator.signature.destroy'))
+            ->assertOk()
+            ->assertJsonPath('signature', null);
+
+        $this->assertDatabaseMissing('document_generator_signatures', [
+            'user_id' => $user->id,
+        ]);
+    }
+
+    public function test_signature_store_requires_image_for_first_time_setup(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $this->post(route('document-generator.signature.store'), [
+            'page2_anchor' => 'bottom_right',
+            'page2_offset_x' => 0,
+            'page2_offset_y' => 0,
+            'page2_width' => 40,
+            'page2_height' => 16,
+            'page3_anchor' => 'bottom_right',
+            'page3_offset_x' => 0,
+            'page3_offset_y' => 0,
+            'page3_width' => 40,
+            'page3_height' => 16,
+        ], [
+            'Accept' => 'application/json',
+            'X-Requested-With' => 'XMLHttpRequest',
+        ])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['signature_file']);
     }
 
     public function test_document_generator_global_template_mapping_page_loads(): void
@@ -806,6 +895,404 @@ class DocumentGeneratorTest extends TestCase
             ->assertOk()
             ->assertJsonPath('data.0.id', $matchingItem->id)
             ->assertJsonCount(1, 'data');
+    }
+
+    public function test_document_generator_items_returns_rows_across_user_batches_only(): void
+    {
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        $this->actingAs($user);
+
+        $firstBatch = DocumentBatch::factory()->for($user)->create([
+            'source_excel_name' => 'first.xlsx',
+            'template_name' => 'first.docx',
+        ]);
+        $secondBatch = DocumentBatch::factory()->for($user)->create([
+            'source_excel_name' => 'second.xlsx',
+            'template_name' => 'second.docx',
+        ]);
+        $otherBatch = DocumentBatch::factory()->for($otherUser)->create();
+
+        $firstItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $firstBatch->id,
+            'row_number' => 2,
+            'status' => 'pdf_done',
+            'row_data' => ['Company Name' => 'Acme Holdings'],
+        ]);
+        $secondItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $secondBatch->id,
+            'row_number' => 3,
+            'status' => 'failed',
+            'row_data' => ['Company Name' => 'Beta Corp'],
+        ]);
+        DocumentBatchItem::factory()->create([
+            'document_batch_id' => $otherBatch->id,
+            'row_number' => 4,
+            'status' => 'pdf_done',
+            'row_data' => ['Company Name' => 'Should Not Appear'],
+        ]);
+
+        $response = $this->getJson(route('document-generator.items'));
+
+        $response
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.id', $secondItem->id)
+            ->assertJsonPath('data.0.batch_id', $secondBatch->id)
+            ->assertJsonPath('data.0.source_excel_name', 'second.xlsx')
+            ->assertJsonPath('data.1.id', $firstItem->id)
+            ->assertJsonPath('data.1.batch_id', $firstBatch->id)
+            ->assertJsonPath('data.1.source_excel_name', 'first.xlsx');
+    }
+
+    public function test_document_generator_items_respects_status_and_company_filters(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $batch = DocumentBatch::factory()->for($user)->create();
+        $matchingItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'pdf_done',
+            'row_data' => ['Company Name' => 'Acme Holdings'],
+        ]);
+        DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'queued',
+            'row_data' => ['Company Name' => 'Acme Queued'],
+        ]);
+        DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'pdf_done',
+            'row_data' => ['Company Name' => 'Beta Corp'],
+        ]);
+
+        $this->getJson(route('document-generator.items', [
+            'status' => 'pdf_done',
+            'company_search' => 'acme',
+        ]))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $matchingItem->id);
+    }
+
+    public function test_document_generator_items_excludes_soft_deleted_batches_and_items(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $visibleBatch = DocumentBatch::factory()->for($user)->create();
+        $deletedBatch = DocumentBatch::factory()->for($user)->create();
+
+        $visibleItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $visibleBatch->id,
+            'status' => 'pdf_done',
+        ]);
+        DocumentBatchItem::factory()->create([
+            'document_batch_id' => $visibleBatch->id,
+            'status' => 'pdf_done',
+        ])->delete();
+        DocumentBatchItem::factory()->create([
+            'document_batch_id' => $deletedBatch->id,
+            'status' => 'pdf_done',
+        ]);
+
+        $deletedBatch->delete();
+
+        $this->getJson(route('document-generator.items'))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $visibleItem->id);
+    }
+
+    public function test_document_generator_items_supports_sorting_and_pagination(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $batch = DocumentBatch::factory()->for($user)->create();
+
+        $firstItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 2,
+        ]);
+        $secondItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 9,
+        ]);
+        $thirdItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 5,
+        ]);
+
+        $response = $this->getJson(route('document-generator.items', [
+            'sort_by' => 'row_number',
+            'sort_direction' => 'desc',
+            'per_page' => 2,
+            'page' => 1,
+        ]));
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('total', 3)
+            ->assertJsonPath('per_page', 2)
+            ->assertJsonPath('last_page', 2)
+            ->assertJsonPath('data.0.id', $secondItem->id)
+            ->assertJsonPath('data.1.id', $thirdItem->id);
+
+        $this->getJson(route('document-generator.items', [
+            'sort_by' => 'row_number',
+            'sort_direction' => 'desc',
+            'per_page' => 2,
+            'page' => 2,
+        ]))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $firstItem->id);
+    }
+
+    public function test_document_generator_items_can_return_only_generated_files(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $batch = DocumentBatch::factory()->for($user)->create();
+
+        $generatedItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'pdf_done',
+            'pdf_path' => "document-generator/{$user->id}/batch-{$batch->id}/row-2.pdf",
+        ]);
+        DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'queued',
+            'docx_path' => null,
+            'pdf_path' => null,
+        ]);
+
+        $this->getJson(route('document-generator.items', [
+            'files_only' => 1,
+        ]))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $generatedItem->id);
+    }
+
+    public function test_job_does_not_auto_apply_signature_even_when_user_has_saved_signature(): void
+    {
+        Storage::fake('local');
+
+        $owner = User::factory()->create();
+        $batch = $this->createBatchWithTemplate($owner);
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'row_number' => 2,
+            'row_data' => ['Name' => 'Jane', 'SEC REGISTRATION DATE' => '7/23/2024 00:00:00'],
+            'status' => 'queued',
+        ]);
+
+        $signaturePath = "document-generator/{$owner->id}/signature/processed-signature.png";
+        Storage::disk('local')->put($signaturePath, 'png-content');
+
+        DocumentGeneratorSignature::query()->create([
+            'user_id' => $owner->id,
+            'processed_signature_path' => $signaturePath,
+            'original_signature_path' => null,
+            'anchor' => 'bottom_right',
+            'offset_x' => 2,
+            'offset_y' => 3,
+            'width' => 40,
+            'height' => 16,
+            'page2_anchor' => 'bottom_right',
+            'page2_offset_x' => 2,
+            'page2_offset_y' => 3,
+            'page2_width' => 40,
+            'page2_height' => 16,
+            'page3_anchor' => 'bottom_right',
+            'page3_offset_x' => 2,
+            'page3_offset_y' => 3,
+            'page3_width' => 40,
+            'page3_height' => 16,
+        ]);
+
+        $docxService = Mockery::mock(DocxTemplateService::class);
+        $docxService->shouldReceive('validateRowData')
+            ->once()
+            ->andReturn([
+                'missing_data' => [],
+                'errors' => [],
+            ]);
+        $docxService->shouldReceive('render')
+            ->once()
+            ->andReturnUsing(function (string $templatePath, string $outputPath): void {
+                file_put_contents($outputPath, 'docx-content');
+            });
+
+        $pdfService = Mockery::mock(PdfConversionService::class);
+        $pdfService->shouldReceive('convertDocxToPdf')
+            ->once()
+            ->andReturnUsing(function (string $docxPath): string {
+                $pdfPath = preg_replace('/\.docx$/', '.pdf', $docxPath);
+                file_put_contents((string) $pdfPath, 'pdf-content');
+
+                return (string) $pdfPath;
+            });
+
+        (new GenerateDocumentBatchItemJob($item->id))->handle(
+            app(\App\Services\DocumentBatchActivityLogger::class),
+            $docxService,
+            $pdfService,
+            app(\App\Services\ExcelExtractionService::class),
+        );
+
+        $item->refresh();
+        $this->assertSame('pdf_done', $item->status);
+        $this->assertNotNull($item->pdf_path);
+    }
+
+    public function test_owner_can_manually_apply_signature_to_single_pdf_item(): void
+    {
+        Storage::fake('local');
+
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $batch = $this->createBatchWithTemplate($user);
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'pdf_done',
+            'pdf_path' => "document-generator/{$user->id}/batch-{$batch->id}/row-2.pdf",
+        ]);
+        Storage::disk('local')->put((string) $item->pdf_path, 'pdf-content');
+
+        $signaturePath = "document-generator/{$user->id}/signature/processed-signature.png";
+        Storage::disk('local')->put($signaturePath, 'png-content');
+
+        DocumentGeneratorSignature::query()->create([
+            'user_id' => $user->id,
+            'processed_signature_path' => $signaturePath,
+            'original_signature_path' => null,
+            'anchor' => 'bottom_right',
+            'offset_x' => 2,
+            'offset_y' => 3,
+            'width' => 40,
+            'height' => 16,
+            'page2_anchor' => 'bottom_right',
+            'page2_offset_x' => 2,
+            'page2_offset_y' => 3,
+            'page2_width' => 40,
+            'page2_height' => 16,
+            'page3_anchor' => 'top_left',
+            'page3_offset_x' => 4,
+            'page3_offset_y' => 5,
+            'page3_width' => 35,
+            'page3_height' => 14,
+        ]);
+
+        $stampService = Mockery::mock(PdfSignatureStampService::class);
+        $stampService
+            ->shouldReceive('stampFileWithPageLayouts')
+            ->once()
+            ->with(
+                Mockery::type('string'),
+                Mockery::type('string'),
+                Mockery::on(static fn (array $layouts): bool => isset($layouts[2], $layouts[3])),
+            );
+        $this->app->instance(PdfSignatureStampService::class, $stampService);
+
+        $this->postJson(route('document-generator.batches.items.signature', [$batch, $item]))
+            ->assertOk()
+            ->assertJsonPath('message', 'Signature applied.');
+    }
+
+    public function test_manual_signature_requires_saved_default_signature(): void
+    {
+        Storage::fake('local');
+
+        $user = User::factory()->create();
+        $this->actingAs($user);
+
+        $batch = $this->createBatchWithTemplate($user);
+        $item = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'pdf_done',
+            'pdf_path' => "document-generator/{$user->id}/batch-{$batch->id}/row-2.pdf",
+        ]);
+        Storage::disk('local')->put((string) $item->pdf_path, 'pdf-content');
+
+        $this->postJson(route('document-generator.batches.items.signature', [$batch, $item]))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['signature']);
+    }
+
+    public function test_bulk_manual_signature_can_return_mixed_results(): void
+    {
+        Storage::fake('local');
+
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        $this->actingAs($user);
+
+        $batch = $this->createBatchWithTemplate($user);
+        $successItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'pdf_done',
+            'pdf_path' => "document-generator/{$user->id}/batch-{$batch->id}/row-2.pdf",
+        ]);
+        Storage::disk('local')->put((string) $successItem->pdf_path, 'pdf-content');
+
+        $failedItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $batch->id,
+            'status' => 'pdf_done',
+            'pdf_path' => null,
+        ]);
+
+        $otherBatch = $this->createBatchWithTemplate($otherUser);
+        $otherItem = DocumentBatchItem::factory()->create([
+            'document_batch_id' => $otherBatch->id,
+            'status' => 'pdf_done',
+            'pdf_path' => "document-generator/{$otherUser->id}/batch-{$otherBatch->id}/row-2.pdf",
+        ]);
+
+        $signaturePath = "document-generator/{$user->id}/signature/processed-signature.png";
+        Storage::disk('local')->put($signaturePath, 'png-content');
+
+        DocumentGeneratorSignature::query()->create([
+            'user_id' => $user->id,
+            'processed_signature_path' => $signaturePath,
+            'original_signature_path' => null,
+            'anchor' => 'bottom_right',
+            'offset_x' => 2,
+            'offset_y' => 3,
+            'width' => 40,
+            'height' => 16,
+            'page2_anchor' => 'bottom_right',
+            'page2_offset_x' => 2,
+            'page2_offset_y' => 3,
+            'page2_width' => 40,
+            'page2_height' => 16,
+            'page3_anchor' => 'bottom_right',
+            'page3_offset_x' => 2,
+            'page3_offset_y' => 3,
+            'page3_width' => 40,
+            'page3_height' => 16,
+        ]);
+
+        $stampService = Mockery::mock(PdfSignatureStampService::class);
+        $stampService->shouldReceive('stampFileWithPageLayouts')->once();
+        $this->app->instance(PdfSignatureStampService::class, $stampService);
+
+        $this->postJson(route('document-generator.items.signature.bulk'), [
+            'targets' => [
+                ['batch_id' => $batch->id, 'item_id' => $successItem->id],
+                ['batch_id' => $batch->id, 'item_id' => $failedItem->id],
+                ['batch_id' => $otherBatch->id, 'item_id' => $otherItem->id],
+            ],
+        ])
+            ->assertOk()
+            ->assertJsonPath('results.0.success', true)
+            ->assertJsonPath('results.1.success', false)
+            ->assertJsonPath('results.2.success', false);
     }
 
     public function test_job_allows_generation_when_placeholder_has_no_matching_header(): void

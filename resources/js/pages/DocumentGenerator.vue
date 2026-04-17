@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { Head } from '@inertiajs/vue3';
 import type { ColumnDef } from '@tanstack/vue-table';
-import { computed, h, onBeforeUnmount, reactive, ref } from 'vue';
+import { MoreVertical } from 'lucide-vue-next';
+import { computed, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -14,6 +15,12 @@ import {
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -21,57 +28,27 @@ import { Spinner } from '@/components/ui/spinner';
 import AppLayout from '@/layouts/AppLayout.vue';
 import { createToast, showToast } from '@/lib/toast';
 import documentGeneratorRoutes from '@/routes/document-generator';
+import generatedFilesRoutes from '@/routes/generated-files';
 import type { BreadcrumbItem } from '@/types';
 
 type SortDirection = 'asc' | 'desc';
 
-type BatchProgress = {
-    batch_id: number;
-    status: string;
-    total_items: number;
-    processed_items: number;
-    success_items: number;
-    failed_items: number;
-    progress_percent: number;
-};
-
-type BatchItem = {
+type UnifiedItem = {
     id: number;
+    batch_id: number;
     row_number: number;
     company: string;
     status: string;
     row_data: Record<string, string>;
     docx_available: boolean;
     pdf_available: boolean;
+    signature_applied: boolean;
+    signature_applied_at: string | null;
     error_message: string | null;
-    created_at: string | null;
-    updated_at: string | null;
-};
-
-type HistoryBatch = {
-    id: number;
     source_excel_name: string;
     template_name: string;
-    status: string;
-    total_items: number;
-    processed_items: number;
-    success_items: number;
-    failed_items: number;
     created_at: string | null;
-    completed_at: string | null;
-};
-
-type ActivityLog = {
-    id: number;
-    action: string;
-    summary: string;
-    details: Record<string, unknown>;
-    created_at: string | null;
-    row_number: number | null;
-    user: {
-        id: number;
-        name: string;
-    } | null;
+    updated_at: string | null;
 };
 
 type PaginatedResponse<T> = {
@@ -82,8 +59,27 @@ type PaginatedResponse<T> = {
     total: number;
 };
 
+type SignatureAnchor = 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right' | 'center';
+
+type SignatureLayout = {
+    anchor: SignatureAnchor;
+    offset_x: number;
+    offset_y: number;
+    width: number;
+    height: number;
+};
+
+type SignatureSettings = {
+    page2: SignatureLayout;
+    page3: SignatureLayout;
+    preview_url: string;
+};
+
 const props = defineProps<{
-    initialHistory: PaginatedResponse<HistoryBatch>;
+    initialItems: PaginatedResponse<UnifiedItem>;
+    initialSignature: {
+        signature: SignatureSettings | null;
+    };
 }>();
 
 const breadcrumbs: BreadcrumbItem[] = [
@@ -99,46 +95,45 @@ const createErrors = ref<Record<string, string[]>>({});
 const createErrorMessage = ref<string | null>(null);
 const creatingBatch = ref(false);
 
-const activeBatchId = ref<number | null>(null);
-const progress = ref<BatchProgress | null>(null);
-const pollingActive = ref(false);
-
-const itemsData = ref<PaginatedResponse<BatchItem>>({
-    current_page: 1,
-    data: [],
-    last_page: 1,
-    per_page: 10,
-    total: 0,
-});
+const itemsData = ref<PaginatedResponse<UnifiedItem>>(props.initialItems);
 const itemsLoading = ref(false);
-const itemsSortBy = ref('row_number');
-const itemsSortDirection = ref<SortDirection>('asc');
+const itemsSortBy = ref('created_at');
+const itemsSortDirection = ref<SortDirection>('desc');
 const itemStatusFilter = ref('all');
+const itemSignatureFilter = ref('all');
 const companySearch = ref('');
-
-const activityData = ref<PaginatedResponse<ActivityLog>>({
-    current_page: 1,
-    data: [],
-    last_page: 1,
-    per_page: 10,
-    total: 0,
-});
-const activityLoading = ref(false);
-
-const historyData = ref<PaginatedResponse<HistoryBatch>>(props.initialHistory);
-const historyLoading = ref(false);
-const historySortBy = ref('created_at');
-const historySortDirection = ref<SortDirection>('desc');
+const pollingActive = ref(false);
 
 const editDialogOpen = ref(false);
 const editSubmitting = ref(false);
 const editErrorMessage = ref<string | null>(null);
 const editErrors = ref<Record<string, string[]>>({});
-const editingItem = ref<BatchItem | null>(null);
+const editingItem = ref<UnifiedItem | null>(null);
 const editForm = reactive<Record<string, string>>({});
-const deleteBatchDialogOpen = ref(false);
-const batchDeleting = ref(false);
-const batchPendingDelete = ref<HistoryBatch | null>(null);
+const signatureDialogOpen = ref(false);
+const signatureSaving = ref(false);
+const signatureDeleting = ref(false);
+const signatureErrorMessage = ref<string | null>(null);
+const signatureErrors = ref<Record<string, string[]>>({});
+const signatureFile = ref<File | null>(null);
+const signatureData = ref<SignatureSettings | null>(props.initialSignature.signature);
+const signatureForm = reactive({
+    page2: {
+        anchor: (props.initialSignature.signature?.page2.anchor ?? 'bottom_right') as SignatureAnchor,
+        offset_x: props.initialSignature.signature?.page2.offset_x ?? 0,
+        offset_y: props.initialSignature.signature?.page2.offset_y ?? 0,
+        width: props.initialSignature.signature?.page2.width ?? 40,
+        height: props.initialSignature.signature?.page2.height ?? 16,
+    },
+    page3: {
+        anchor: (props.initialSignature.signature?.page3.anchor ?? 'bottom_right') as SignatureAnchor,
+        offset_x: props.initialSignature.signature?.page3.offset_x ?? 0,
+        offset_y: props.initialSignature.signature?.page3.offset_y ?? 0,
+        width: props.initialSignature.signature?.page3.width ?? 40,
+        height: props.initialSignature.signature?.page3.height ?? 16,
+    },
+});
+const signingItemIds = ref<number[]>([]);
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let companySearchDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -238,41 +233,106 @@ const sendDelete = async (url: string): Promise<void> => {
     }
 };
 
-const postBatch = async () => {
-    if (!excelFile.value) {
-        createErrorMessage.value = 'Excel file is required.';
-        return;
+const sendPostJson = async <T>(url: string, payload: unknown): Promise<T> => {
+    const response = await fetch(url, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-XSRF-TOKEN': csrfToken(),
+        },
+        body: JSON.stringify(payload),
+    });
+
+    if (response.status === 422) {
+        const errorPayload = (await response.json()) as {
+            errors?: Record<string, string[]>;
+            message?: string;
+        };
+        const validationError = new Error(errorPayload.message ?? 'Validation failed.');
+        Object.assign(validationError, { validationErrors: errorPayload.errors ?? {} });
+        throw validationError;
     }
 
-    if (companySearchDebounce) {
-        clearTimeout(companySearchDebounce);
-        companySearchDebounce = null;
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}`);
+    }
+
+    return (await response.json()) as T;
+};
+
+const buildItemsUrl = (page = itemsData.value.current_page) => {
+    const query: Record<string, string> = {
+        page: String(page),
+        per_page: String(itemsData.value.per_page),
+        sort_by: itemsSortBy.value,
+        sort_direction: itemsSortDirection.value,
+    };
+
+    if (itemStatusFilter.value !== 'all') {
+        query.status = itemStatusFilter.value;
+    }
+    if (itemSignatureFilter.value !== 'all') {
+        query.signature_filter = itemSignatureFilter.value;
     }
 
     if (companySearch.value.trim() !== '') {
-        companySearch.value = '';
+        query.company_search = companySearch.value.trim();
     }
 
-    if (activeBatchId.value !== null) {
-        activeBatchId.value = null;
-        itemsData.value = {
-            current_page: 1,
-            data: [],
-            last_page: 1,
-            per_page: itemsData.value.per_page,
-            total: 0,
-        };
-        activityData.value = {
-            current_page: 1,
-            data: [],
-            last_page: 1,
-            per_page: activityData.value.per_page,
-            total: 0,
-        };
-        progress.value = null;
-        stopPolling();
+    const params = new URLSearchParams(query);
+
+    return `/document-generator/items?${params.toString()}`;
+};
+
+const hasPendingVisibleItems = computed(() =>
+    itemsData.value.data.some((item) => ['queued', 'processing'].includes(item.status)),
+);
+
+const stopPolling = () => {
+    pollingActive.value = false;
+
+    if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+    }
+};
+
+const loadItems = async (page = itemsData.value.current_page) => {
+    itemsLoading.value = true;
+
+    try {
+        itemsData.value = await getApi<PaginatedResponse<UnifiedItem>>(buildItemsUrl(page));
+
+        if (pollingActive.value && !hasPendingVisibleItems.value) {
+            stopPolling();
+        }
+    } finally {
+        itemsLoading.value = false;
+    }
+};
+
+const startPolling = () => {
+    stopPolling();
+
+    if (!hasPendingVisibleItems.value) {
+        return;
     }
 
+    pollingActive.value = true;
+
+    pollInterval = setInterval(async () => {
+        try {
+            await loadItems();
+        } catch {
+            stopPolling();
+        }
+    }, 2000);
+};
+
+const postBatch = async () => {
     if (!excelFile.value) {
         createErrorMessage.value = 'Excel file is required.';
         return;
@@ -285,6 +345,7 @@ const postBatch = async () => {
     try {
         const formData = new FormData();
         formData.append('excel_file', excelFile.value);
+
         if (defaultTemplateFile.value) {
             formData.append('default_template_file', defaultTemplateFile.value);
         }
@@ -315,10 +376,7 @@ const postBatch = async () => {
             throw new Error(`Failed to create batch (${response.status}).`);
         }
 
-        const payload = (await response.json()) as { batch_id: number };
-        activeBatchId.value = payload.batch_id;
-
-        await Promise.all([loadProgress(), loadBatchItems(1), loadActivityLogs(1), loadHistory(1)]);
+        await loadItems(1);
         startPolling();
         showNotice('success', 'Batch started', 'Document generation has started for the uploaded file.');
     } catch (error) {
@@ -342,9 +400,21 @@ const onTemplateFileChange = (event: Event) => {
     defaultTemplateFile.value = input.files?.[0] ?? null;
 };
 
+const onSignatureFileChange = (event: Event) => {
+    const input = event.target as HTMLInputElement;
+    signatureFile.value = input.files?.[0] ?? null;
+};
+
 const onItemStatusChange = async (value: string) => {
     itemStatusFilter.value = value;
-    await loadBatchItems(1);
+    await loadItems(1);
+    startPolling();
+};
+
+const onItemSignatureFilterChange = async (value: string) => {
+    itemSignatureFilter.value = value;
+    await loadItems(1);
+    startPolling();
 };
 
 const onCompanySearchInput = (event: Event) => {
@@ -355,153 +425,14 @@ const onCompanySearchInput = (event: Event) => {
         clearTimeout(companySearchDebounce);
     }
 
-    companySearchDebounce = setTimeout(() => {
-        void loadBatchItems(1);
+    companySearchDebounce = setTimeout(async () => {
+        await loadItems(1);
+        startPolling();
     }, 300);
 };
 
-const loadProgress = async () => {
-    if (!activeBatchId.value) {
-        return;
-    }
-
-    progress.value = await getApi<BatchProgress>(
-        documentGeneratorRoutes.batches.progress.url({ batch: activeBatchId.value }),
-    );
-};
-
-const loadBatchItems = async (page = itemsData.value.current_page) => {
-    if (!activeBatchId.value) {
-        return;
-    }
-
-    itemsLoading.value = true;
-    try {
-        const query: Record<string, string | number> = {
-            page,
-            per_page: itemsData.value.per_page,
-            sort_by: itemsSortBy.value,
-            sort_direction: itemsSortDirection.value,
-        };
-
-        if (itemStatusFilter.value !== 'all') {
-            query.status = itemStatusFilter.value;
-        }
-        if (companySearch.value.trim() !== '') {
-            query.company_search = companySearch.value.trim();
-        }
-
-        itemsData.value = await getApi<PaginatedResponse<BatchItem>>(
-            documentGeneratorRoutes.batches.items.url(
-                { batch: activeBatchId.value },
-                {
-                    query,
-                },
-            ),
-        );
-    } finally {
-        itemsLoading.value = false;
-    }
-};
-
-const loadHistory = async (page = historyData.value.current_page) => {
-    historyLoading.value = true;
-    try {
-        historyData.value = await getApi<PaginatedResponse<HistoryBatch>>(
-            documentGeneratorRoutes.batches.history.url({
-                query: {
-                    page,
-                    history_per_page: historyData.value.per_page,
-                    sort_by: historySortBy.value,
-                    sort_direction: historySortDirection.value,
-                },
-            }),
-        );
-    } finally {
-        historyLoading.value = false;
-    }
-};
-
-const loadActivityLogs = async (page = activityData.value.current_page) => {
-    if (!activeBatchId.value) {
-        return;
-    }
-
-    activityLoading.value = true;
-    try {
-        activityData.value = await getApi<PaginatedResponse<ActivityLog>>(
-            documentGeneratorRoutes.batches.logs.url(
-                { batch: activeBatchId.value },
-                {
-                    query: {
-                        page,
-                        per_page: activityData.value.per_page,
-                    },
-                },
-            ),
-        );
-    } finally {
-        activityLoading.value = false;
-    }
-};
-
-const stopPolling = () => {
-    pollingActive.value = false;
-    if (pollInterval) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-    }
-};
-
-const startPolling = () => {
-    stopPolling();
-    pollingActive.value = true;
-
-    pollInterval = setInterval(async () => {
-        try {
-            await loadProgress();
-            await loadBatchItems();
-            await loadActivityLogs();
-
-            if (progress.value && ['completed', 'failed'].includes(progress.value.status)) {
-                stopPolling();
-                await loadHistory(1);
-            }
-        } catch {
-            stopPolling();
-        }
-    }, 2000);
-};
-
-const progressText = computed(() => {
-    if (!progress.value) {
-        return 'No active batch';
-    }
-
-    return `${progress.value.processed_items}/${progress.value.total_items} processed`;
-});
-
+const canEditItem = (item: UnifiedItem) => !['queued', 'processing'].includes(item.status);
 const editFormEntries = computed(() => Object.entries(editForm));
-
-const canEditItem = (item: BatchItem) => !['queued', 'processing'].includes(item.status);
-
-const normalizeHeader = (header: string) =>
-    header.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-
-const extractSecRegistrationYear = (rowData: Record<string, string>) => {
-    for (const [header, value] of Object.entries(rowData)) {
-        if (normalizeHeader(header) !== 'sec_registration_date') {
-            continue;
-        }
-
-        const match = value.match(/\b(\d{4})\b/);
-        if (match) {
-            return match[1];
-        }
-    }
-
-    return null;
-};
 
 const resetEditForm = () => {
     for (const key of Object.keys(editForm)) {
@@ -509,7 +440,7 @@ const resetEditForm = () => {
     }
 };
 
-const openEditDialog = (item: BatchItem) => {
+const openEditDialog = (item: UnifiedItem) => {
     editingItem.value = item;
     editDialogOpen.value = true;
     editErrorMessage.value = null;
@@ -529,71 +460,47 @@ const closeEditDialog = () => {
     resetEditForm();
 };
 
-const openDeleteBatchDialog = (batch: HistoryBatch) => {
-    batchPendingDelete.value = batch;
-    deleteBatchDialogOpen.value = true;
-};
+const isItemSigning = (itemId: number) => signingItemIds.value.includes(itemId);
 
-const closeDeleteBatchDialog = () => {
-    deleteBatchDialogOpen.value = false;
-    batchPendingDelete.value = null;
-};
-
-const confirmDeleteBatch = async () => {
-    if (!batchPendingDelete.value) {
+const applySignatureToItem = async (item: UnifiedItem) => {
+    if (!item.pdf_available || item.signature_applied || isItemSigning(item.id)) {
         return;
     }
 
-    const deletingBatchId = batchPendingDelete.value.id;
-    batchDeleting.value = true;
+    signingItemIds.value = [...signingItemIds.value, item.id];
 
     try {
-        await sendDelete(
-            documentGeneratorRoutes.batches.destroy.url({
-                batch: deletingBatchId,
+        const payload = await sendPostJson<{
+            message: string;
+            item: Record<string, unknown>;
+            pdf_url: string;
+        }>(
+            documentGeneratorRoutes.batches.items.signature.url({
+                batch: item.batch_id,
+                item: item.id,
             }),
+            {},
         );
 
-        if (activeBatchId.value === deletingBatchId) {
-            activeBatchId.value = null;
-            progress.value = null;
-            itemsData.value = {
-                current_page: 1,
-                data: [],
-                last_page: 1,
-                per_page: itemsData.value.per_page,
-                total: 0,
-            };
-            activityData.value = {
-                current_page: 1,
-                data: [],
-                last_page: 1,
-                per_page: activityData.value.per_page,
-                total: 0,
-            };
-            stopPolling();
+        await loadItems(itemsData.value.current_page);
+        showNotice('success', 'Signature applied', `Row ${item.row_number} was signed.`);
+
+        if (payload.pdf_url) {
+            window.open(payload.pdf_url, '_blank', 'noopener,noreferrer');
         }
-
-        await loadHistory(
-            historyData.value.current_page > 1 && historyData.value.data.length === 1
-                ? historyData.value.current_page - 1
-                : historyData.value.current_page,
-        );
-        showNotice('success', `Batch #${deletingBatchId} deleted`, 'The batch has been removed from history.');
-        closeDeleteBatchDialog();
     } catch (error) {
         showNotice(
             'error',
-            'Batch was not deleted',
-            error instanceof Error ? error.message : 'Unable to delete batch.',
+            'Signature was not applied',
+            error instanceof Error ? error.message : 'Unable to apply signature.',
         );
     } finally {
-        batchDeleting.value = false;
+        signingItemIds.value = signingItemIds.value.filter((id) => id !== item.id);
     }
 };
 
 const saveEditedItem = async () => {
-    if (!activeBatchId.value || !editingItem.value) {
+    if (!editingItem.value) {
         return;
     }
 
@@ -602,9 +509,9 @@ const saveEditedItem = async () => {
     editErrors.value = {};
 
     try {
-        await sendJson<BatchItem>(
+        await sendJson<UnifiedItem>(
             documentGeneratorRoutes.batches.items.update.url({
-                batch: activeBatchId.value,
+                batch: editingItem.value.batch_id,
                 item: editingItem.value.id,
             }),
             'PUT',
@@ -613,20 +520,137 @@ const saveEditedItem = async () => {
             },
         );
 
-        await Promise.all([loadProgress(), loadBatchItems(itemsData.value.current_page), loadActivityLogs(1), loadHistory(1)]);
+        await loadItems(itemsData.value.current_page);
         startPolling();
         closeEditDialog();
     } catch (error) {
         if (error instanceof Error && 'validationErrors' in error) {
             editErrors.value = (error as Error & { validationErrors?: Record<string, string[]> }).validationErrors ?? {};
         }
+
         editErrorMessage.value = error instanceof Error ? error.message : 'Unable to update row.';
     } finally {
         editSubmitting.value = false;
     }
 };
 
-const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
+const openSignatureDialog = () => {
+    signatureDialogOpen.value = true;
+    signatureErrorMessage.value = null;
+    signatureErrors.value = {};
+    signatureFile.value = null;
+};
+
+const saveSignature = async () => {
+    signatureSaving.value = true;
+    signatureErrorMessage.value = null;
+    signatureErrors.value = {};
+
+    try {
+        const formData = new FormData();
+        formData.append('page2_anchor', signatureForm.page2.anchor);
+        formData.append('page2_offset_x', String(signatureForm.page2.offset_x));
+        formData.append('page2_offset_y', String(signatureForm.page2.offset_y));
+        formData.append('page2_width', String(signatureForm.page2.width));
+        formData.append('page2_height', String(signatureForm.page2.height));
+        formData.append('page3_anchor', signatureForm.page3.anchor);
+        formData.append('page3_offset_x', String(signatureForm.page3.offset_x));
+        formData.append('page3_offset_y', String(signatureForm.page3.offset_y));
+        formData.append('page3_width', String(signatureForm.page3.width));
+        formData.append('page3_height', String(signatureForm.page3.height));
+        if (signatureFile.value) {
+            formData.append('signature_file', signatureFile.value);
+        }
+
+        const response = await fetch('/document-generator/signature', {
+            method: 'POST',
+            body: formData,
+            credentials: 'same-origin',
+            headers: {
+                Accept: 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-XSRF-TOKEN': csrfToken(),
+            },
+        });
+
+        if (response.status === 422) {
+            const payload = (await response.json()) as {
+                errors?: Record<string, string[]>;
+                message?: string;
+            };
+            signatureErrors.value = payload.errors ?? {};
+            signatureErrorMessage.value = payload.message ?? 'Validation failed.';
+            return;
+        }
+
+        if (!response.ok) {
+            throw new Error(`Request failed with status ${response.status}`);
+        }
+
+        const payload = (await response.json()) as {
+            signature: SignatureSettings | null;
+        };
+        signatureData.value = payload.signature;
+        if (payload.signature) {
+            signatureForm.page2.anchor = payload.signature.page2.anchor;
+            signatureForm.page2.offset_x = payload.signature.page2.offset_x;
+            signatureForm.page2.offset_y = payload.signature.page2.offset_y;
+            signatureForm.page2.width = payload.signature.page2.width;
+            signatureForm.page2.height = payload.signature.page2.height;
+            signatureForm.page3.anchor = payload.signature.page3.anchor;
+            signatureForm.page3.offset_x = payload.signature.page3.offset_x;
+            signatureForm.page3.offset_y = payload.signature.page3.offset_y;
+            signatureForm.page3.width = payload.signature.page3.width;
+            signatureForm.page3.height = payload.signature.page3.height;
+        }
+        signatureFile.value = null;
+        showNotice('success', 'Signature saved', 'You can now apply it manually from each file row.');
+    } catch (error) {
+        signatureErrorMessage.value = error instanceof Error ? error.message : 'Unable to save signature settings.';
+    } finally {
+        signatureSaving.value = false;
+    }
+};
+
+const removeSignature = async () => {
+    signatureDeleting.value = true;
+    signatureErrorMessage.value = null;
+    signatureErrors.value = {};
+
+    try {
+        await sendDelete('/document-generator/signature');
+        signatureData.value = null;
+        signatureFile.value = null;
+        showNotice('success', 'Signature removed', 'Manual sign actions will require uploading a signature again.');
+    } catch (error) {
+        signatureErrorMessage.value = error instanceof Error ? error.message : 'Unable to remove signature.';
+    } finally {
+        signatureDeleting.value = false;
+    }
+};
+
+const itemColumns = computed<ColumnDef<UnifiedItem>[]>(() => [
+    {
+        id: 'batch_id',
+        accessorKey: 'batch_id',
+        header: 'Batch',
+        enableSorting: false,
+        cell: ({ row }) => `#${row.original.batch_id}`,
+    },
+    {
+        id: 'source_excel_name',
+        accessorKey: 'source_excel_name',
+        header: 'Excel',
+        enableSorting: false,
+        cell: ({ row }) => row.original.source_excel_name || '-',
+    },
+    {
+        id: 'template_name',
+        accessorKey: 'template_name',
+        header: 'Template',
+        enableSorting: false,
+        cell: ({ row }) => row.original.template_name || '-',
+    },
     {
         id: 'row_number',
         accessorKey: 'row_number',
@@ -641,23 +665,32 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
         cell: ({ row }) => row.original.company || '-',
     },
     {
-        id: 'sec_registration_year',
-        header: 'Year',
-        enableSorting: false,
-        cell: ({ row }) => extractSecRegistrationYear(row.original.row_data) ?? '-',
-    },
-    {
         id: 'status',
         accessorKey: 'status',
         header: 'Status',
         enableSorting: true,
         cell: ({ row }) =>
             h(
-                Badge,
-                {
-                    variant: statusBadgeVariant(row.original.status),
-                },
-                () => row.original.status,
+                'div',
+                { class: 'flex items-center gap-2' },
+                [
+                    h(
+                        Badge,
+                        {
+                            variant: statusBadgeVariant(row.original.status),
+                        },
+                        () => row.original.status,
+                    ),
+                    row.original.signature_applied
+                        ? h(
+                              Badge,
+                              {
+                                  variant: 'secondary',
+                              },
+                              () => 'Signed',
+                          )
+                        : null,
+                ],
             ),
     },
     {
@@ -672,171 +705,144 @@ const itemColumns = computed<ColumnDef<BatchItem>[]>(() => [
         header: 'Actions',
         enableSorting: false,
         cell: ({ row }) =>
-            h('div', { class: 'flex items-center gap-2' }, [
-                h(
-                    Button,
-                    {
-                        variant: 'outline',
-                        size: 'sm',
-                        disabled: !canEditItem(row.original),
-                        onClick: () => openEditDialog(row.original),
-                    },
-                    () => 'Edit',
-                ),
-                row.original.docx_available
-                    ? h(
-                        'a',
-                        {
-                            href: documentGeneratorRoutes.batches.items.download.url({
-                                batch: activeBatchId.value ?? 0,
-                                item: row.original.id,
-                                type: 'docx',
-                            }),
-                            class: 'text-primary text-sm underline',
-                        },
-                        'DOCX',
-                    )
-                    : h('span', { class: 'text-muted-foreground text-sm' }, 'DOCX'),
-
-                row.original.pdf_available
-                    ? h(
-                          'a',
-                          {
-                              href: documentGeneratorRoutes.batches.items.download.url({
-                                  batch: activeBatchId.value ?? 0,
-                                  item: row.original.id,
-                                  type: 'pdf',
-                              }),
-                              class: 'text-primary text-sm underline',
-                              target: '_blank',
-                              rel: 'noopener noreferrer',
-                          },
-                          'Preview PDF',
-                      )
-                    : h('span', { class: 'text-muted-foreground text-sm' }, 'PDF'),
-            ]),
-    },
-]);
-
-const activityColumns = computed<ColumnDef<ActivityLog>[]>(() => [
-    {
-        id: 'created_at',
-        accessorKey: 'created_at',
-        header: 'When',
-        enableSorting: false,
-        cell: ({ row }) => row.original.created_at ? new Date(row.original.created_at).toLocaleString() : '-',
-    },
-    {
-        id: 'user',
-        header: 'User',
-        enableSorting: false,
-        cell: ({ row }) => row.original.user?.name ?? 'System',
-    },
-    {
-        id: 'row_number',
-        accessorKey: 'row_number',
-        header: 'Row',
-        enableSorting: false,
-        cell: ({ row }) => row.original.row_number ?? '-',
-    },
-    {
-        id: 'action',
-        accessorKey: 'action',
-        header: 'Action',
-        enableSorting: false,
-    },
-    {
-        id: 'summary',
-        accessorKey: 'summary',
-        header: 'Summary',
-        enableSorting: false,
-    },
-]);
-
-const historyColumns = computed<ColumnDef<HistoryBatch>[]>(() => [
-    {
-        id: 'id',
-        accessorKey: 'id',
-        header: 'Batch ID',
-        enableSorting: false,
-    },
-    {
-        id: 'source_excel_name',
-        accessorKey: 'source_excel_name',
-        header: 'Excel',
-        enableSorting: false,
-    },
-    {
-        id: 'template_name',
-        accessorKey: 'template_name',
-        header: 'Template',
-        enableSorting: false,
-    },
-    {
-        id: 'generated',
-        header: 'Generated',
-        enableSorting: false,
-        cell: ({ row }) =>
             h(
-                Badge,
+                DropdownMenu,
+                {},
                 {
-                    variant: row.original.success_items > 0 ? 'default' : 'secondary',
+                    default: () => [
+                        h(
+                            DropdownMenuTrigger,
+                            { asChild: true },
+                            {
+                                default: () =>
+                                    h(
+                                        Button,
+                                        {
+                                            variant: 'outline',
+                                            size: 'icon',
+                                            class: 'size-8',
+                                            'aria-label': 'Row actions',
+                                        },
+                                        {
+                                            default: () =>
+                                                h(MoreVertical, {
+                                                    class: 'size-4',
+                                                }),
+                                        },
+                                    ),
+                            },
+                        ),
+                        h(
+                            DropdownMenuContent,
+                            { align: 'end', class: 'w-44' },
+                            {
+                                default: () => [
+                                    h(
+                                        DropdownMenuItem,
+                                        {
+                                            disabled: !canEditItem(row.original),
+                                            onSelect: (event: Event) => {
+                                                event.preventDefault();
+                                                if (!canEditItem(row.original)) {
+                                                    return;
+                                                }
+                                                openEditDialog(row.original);
+                                            },
+                                        },
+                                        {
+                                            default: () => 'Edit',
+                                        },
+                                    ),
+                                    row.original.docx_available
+                                        ? h(
+                                              DropdownMenuItem,
+                                              { asChild: true },
+                                              {
+                                                  default: () =>
+                                                      h(
+                                                          'a',
+                                                          {
+                                                              href: documentGeneratorRoutes.batches.items.download.url({
+                                                                  batch: row.original.batch_id,
+                                                                  item: row.original.id,
+                                                                  type: 'docx',
+                                                              }),
+                                                          },
+                                                          'DOCX',
+                                                      ),
+                                              },
+                                          )
+                                        : h(
+                                              DropdownMenuItem,
+                                              { disabled: true },
+                                              {
+                                                  default: () => 'DOCX',
+                                              },
+                                          ),
+                                    row.original.pdf_available
+                                        ? h(
+                                              DropdownMenuItem,
+                                              { asChild: true },
+                                              {
+                                                  default: () =>
+                                                      h(
+                                                          'a',
+                                                          {
+                                                              href: documentGeneratorRoutes.batches.items.download.url({
+                                                                  batch: row.original.batch_id,
+                                                                  item: row.original.id,
+                                                                  type: 'pdf',
+                                                              }),
+                                                              target: '_blank',
+                                                              rel: 'noopener noreferrer',
+                                                          },
+                                                          'Preview PDF',
+                                                      ),
+                                              },
+                                          )
+                                        : h(
+                                              DropdownMenuItem,
+                                              { disabled: true },
+                                              {
+                                                  default: () => 'Preview PDF',
+                                              },
+                                          ),
+                                    h(
+                                        DropdownMenuItem,
+                                        {
+                                            disabled: !row.original.pdf_available || row.original.signature_applied || isItemSigning(row.original.id),
+                                            onSelect: (event: Event) => {
+                                                event.preventDefault();
+                                                void applySignatureToItem(row.original);
+                                            },
+                                        },
+                                        {
+                                            default: () => (row.original.signature_applied ? 'Signed' : isItemSigning(row.original.id) ? 'Signing...' : 'Add Signature'),
+                                        },
+                                    ),
+                                ],
+                            },
+                        ),
+                    ],
                 },
-                () => `${row.original.success_items}/${row.original.total_items}`,
             ),
-    },
-    {
-        id: 'summary',
-        header: 'Processed',
-        enableSorting: false,
-        cell: ({ row }) => `${row.original.processed_items}/${row.original.total_items}`,
-    },
-    {
-        id: 'action',
-        header: 'Action',
-        enableSorting: false,
-        cell: ({ row }) =>
-            h('div', { class: 'flex items-center gap-2' }, [
-                h(
-                    Button,
-                    {
-                        variant: 'outline',
-                        size: 'sm',
-                        onClick: async () => {
-                            activeBatchId.value = row.original.id;
-                            await Promise.all([loadProgress(), loadBatchItems(1), loadActivityLogs(1)]);
-                            if (progress.value && !['completed', 'failed'].includes(progress.value.status)) {
-                                startPolling();
-                            } else {
-                                stopPolling();
-                            }
-                        },
-                    },
-                    () => 'Open',
-                ),
-                h(
-                    Button,
-                    {
-                        variant: 'destructive',
-                        size: 'sm',
-                        onClick: () => openDeleteBatchDialog(row.original),
-                    },
-                    () => 'Delete',
-                ),
-            ]),
     },
 ]);
 
 onBeforeUnmount(() => {
     stopPolling();
+
     if (companySearchDebounce) {
         clearTimeout(companySearchDebounce);
     }
 });
+
+onMounted(() => {
+    startPolling();
+});
 </script>
 
 <template>
-
     <Head title="Document Generator" />
 
     <AppLayout :breadcrumbs="breadcrumbs">
@@ -852,9 +858,15 @@ onBeforeUnmount(() => {
                             </CardDescription>
                         </div>
 
-                        <Button variant="outline" as-child>
-                            <a href="/document-generator/template-mapping">Template Mapping</a>
-                        </Button>
+                        <div class="flex items-center gap-2">
+                            <Button variant="outline" as-child>
+                                <a href="/document-generator/template-mapping">Template Mapping</a>
+                            </Button>
+                            <Button variant="outline" @click="openSignatureDialog">Signature Settings</Button>
+                            <Button variant="outline" as-child>
+                                <a :href="generatedFilesRoutes.index().url">Generated Files</a>
+                            </Button>
+                        </div>
                     </div>
                 </CardHeader>
                 <CardContent>
@@ -884,8 +896,7 @@ onBeforeUnmount(() => {
                                 <p class="text-xs text-muted-foreground">
                                     In the 2025 template, placeholders like
                                     <code>{NET INCOME}</code> treat the current file value as 2025 and add the matched
-                                    old-file base value, and
-                                    subtraction stays explicit, such as
+                                    old-file base value, and subtraction stays explicit, such as
                                     <code>{TRADE RECEIVABLES 2025-TRADE RECEIVABLES}</code>.
                                 </p>
                             </div>
@@ -905,99 +916,78 @@ onBeforeUnmount(() => {
             <Card>
                 <CardHeader>
                     <CardTitle class="flex items-center gap-2">
-                        Batch Progress
+                        Generated Rows
                         <Spinner v-if="pollingActive" class="size-4" />
                     </CardTitle>
                     <CardDescription>
-                        {{ progressText }}
+                        One table across all batches with row status, editing, and file downloads.
                     </CardDescription>
                 </CardHeader>
-                <CardContent>
-                    <div class="h-3 w-full overflow-hidden rounded-full bg-muted">
-                        <div class="h-full bg-primary transition-all"
-                            :style="{ width: `${progress?.progress_percent ?? 0}%` }" />
-                    </div>
-                    <div v-if="progress" class="mt-3 grid gap-2 text-sm md:grid-cols-4">
-                        <p>Status: <strong>{{ progress.status }}</strong></p>
-                        <p>Total: <strong>{{ progress.total_items }}</strong></p>
-                        <p>Success: <strong>{{ progress.success_items }}</strong></p>
-                        <p>Failed: <strong>{{ progress.failed_items }}</strong></p>
-                    </div>
-                </CardContent>
-            </Card>
-
-            <Card>
-                <CardHeader>
-                    <CardTitle>Batch Items</CardTitle>
-                    <CardDescription>Per-row output status, editing, and downloads for the selected batch.</CardDescription>
-                </CardHeader>
                 <CardContent class="space-y-4">
-                    <div class="grid gap-4 md:grid-cols-[220px_minmax(0,320px)]">
-                        <div class="max-w-[220px]">
-                            <Label class="mb-2 block">Filter by status</Label>
-                            <Select :model-value="itemStatusFilter"
-                                @update:model-value="(value) => onItemStatusChange(String(value))">
-                                <SelectTrigger>
-                                    <SelectValue placeholder="All statuses" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="all">All</SelectItem>
-                                    <SelectItem value="queued">Queued</SelectItem>
-                                    <SelectItem value="processing">Processing</SelectItem>
-                                    <SelectItem value="docx_done">Docx Done</SelectItem>
-                                    <SelectItem value="pdf_done">Pdf Done</SelectItem>
-                                    <SelectItem value="failed">Failed</SelectItem>
-                                </SelectContent>
-                            </Select>
+                    <div class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                        <div class="w-full max-w-[360px]">
+                            <Label for="company-search" class="mb-2 block">Search company</Label>
+                            <Input
+                                id="company-search"
+                                :model-value="companySearch"
+                                placeholder="Type company name..."
+                                @input="onCompanySearchInput"
+                            />
                         </div>
 
-                        <div class="max-w-[320px]">
-                            <Label for="company-search" class="mb-2 block">Search company</Label>
-                            <Input id="company-search" :model-value="companySearch"
-                                placeholder="Type company name..."
-                                @input="onCompanySearchInput" />
+                        <div class="flex w-full justify-start gap-3 lg:w-auto lg:justify-end">
+                            <div class="w-full ">
+                                <Label class="mb-2 block">Status</Label>
+                                <Select :model-value="itemStatusFilter" @update:model-value="(value) => onItemStatusChange(String(value))">
+                                    <SelectTrigger>
+                                        <SelectValue placeholder="All statuses" class="w-20"/>
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="all">All</SelectItem>
+                                        <SelectItem value="queued">Queued</SelectItem>
+                                        <SelectItem value="processing">Processing</SelectItem>
+                                        <SelectItem value="docx_done">Docx Done</SelectItem>
+                                        <SelectItem value="pdf_done">Pdf Done</SelectItem>
+                                        <SelectItem value="failed">Failed</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
+
+                            <div class="w-full ">
+                                <Label class="mb-2 block">Signature</Label>
+                                <Select :model-value="itemSignatureFilter" @update:model-value="(value) => onItemSignatureFilterChange(String(value))">
+                                    <SelectTrigger>
+                                        <SelectValue placeholder="All signatures" class="w-20"/>
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="all">All</SelectItem>
+                                        <SelectItem value="signed">Signed</SelectItem>
+                                        <SelectItem value="unsigned">Unsigned</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
                         </div>
                     </div>
 
-                    <DataTable :columns="itemColumns" :data="itemsData.data" :meta="itemsData" :loading="itemsLoading"
-                        :sort-by="itemsSortBy" :sort-direction="itemsSortDirection" empty-message="No batch items yet."
-                        @page-change="loadBatchItems"
-                        @per-page-change="async (perPage) => { itemsData.per_page = perPage; await loadBatchItems(1); }"
-                        @sort-change="async (column, direction) => { itemsSortBy = column; itemsSortDirection = direction; await loadBatchItems(1); }" />
-                </CardContent>
-            </Card>
-
-            <Card>
-                <CardHeader>
-                    <CardTitle>Transaction Log</CardTitle>
-                    <CardDescription>Shared activity for edits, regenerations, and validation failures.</CardDescription>
-                </CardHeader>
-                <CardContent>
-                    <DataTable :columns="activityColumns" :data="activityData.data" :meta="activityData"
-                        :loading="activityLoading" sort-by="created_at" sort-direction="desc"
-                        empty-message="No activity recorded for the selected batch." @page-change="loadActivityLogs"
-                        @per-page-change="async (perPage) => { activityData.per_page = perPage; await loadActivityLogs(1); }" />
-                </CardContent>
-            </Card>
-
-            <Card>
-                <CardHeader>
-                    <CardTitle>Batch History</CardTitle>
-                    <CardDescription>Paginated backend history of generated batches.</CardDescription>
-                </CardHeader>
-                <CardContent>
-                    <DataTable :columns="historyColumns" :data="historyData.data" :meta="historyData"
-                        :loading="historyLoading" :sort-by="historySortBy" :sort-direction="historySortDirection"
-                        empty-message="No history available." @page-change="loadHistory"
-                        @per-page-change="async (perPage) => { historyData.per_page = perPage; await loadHistory(1); }"
-                        @sort-change="async (column, direction) => { historySortBy = column; historySortDirection = direction; await loadHistory(1); }" />
+                    <DataTable
+                        :columns="itemColumns"
+                        :data="itemsData.data"
+                        :meta="itemsData"
+                        :loading="itemsLoading"
+                        :sort-by="itemsSortBy"
+                        :sort-direction="itemsSortDirection"
+                        empty-message="No rows available."
+                        @page-change="async (page) => { await loadItems(page); startPolling(); }"
+                        @per-page-change="async (perPage) => { itemsData.per_page = perPage; await loadItems(1); startPolling(); }"
+                        @sort-change="async (column, direction) => { itemsSortBy = column; itemsSortDirection = direction; await loadItems(1); startPolling(); }"
+                    />
                 </CardContent>
             </Card>
 
             <Dialog :open="editDialogOpen" @update:open="(open) => { if (!open) closeEditDialog(); }">
                 <DialogContent class="sm:max-w-2xl">
                     <DialogHeader>
-                        <DialogTitle>Edit Row {{ editingItem?.row_number ?? '-' }}</DialogTitle>
+                        <DialogTitle>Edit Row {{ editingItem?.row_number ?? '-' }} (Batch #{{ editingItem?.batch_id ?? '-' }})</DialogTitle>
                         <DialogDescription>
                             Update the row data and regenerate documents. Old outputs will be deleted first.
                         </DialogDescription>
@@ -1027,20 +1017,118 @@ onBeforeUnmount(() => {
                 </DialogContent>
             </Dialog>
 
-            <Dialog :open="deleteBatchDialogOpen" @update:open="(open) => { if (!open) closeDeleteBatchDialog(); }">
-                <DialogContent>
+            <Dialog :open="signatureDialogOpen" @update:open="(open) => { signatureDialogOpen = open; }">
+                <DialogContent class="sm:max-w-xl max-h-[85vh] overflow-y-auto">
                     <DialogHeader>
-                        <DialogTitle>Delete Batch #{{ batchPendingDelete?.id ?? '-' }}?</DialogTitle>
+                        <DialogTitle>Signature Settings</DialogTitle>
                         <DialogDescription>
-                            This batch will be hidden from history and generated files. Stored files will remain on disk for now.
+                            Upload your default signature image, remove background automatically, and configure separate placements for pages 2 and 3.
                         </DialogDescription>
                     </DialogHeader>
 
+                    <div class="grid gap-4 py-2">
+                        <div class="grid gap-2">
+                            <Label for="signature-file">Signature Image</Label>
+                            <Input id="signature-file" type="file" accept=".png,.jpg,.jpeg,.webp" @change="onSignatureFileChange" />
+                            <p v-if="signatureErrors.signature_file" class="text-sm text-destructive">
+                                {{ signatureErrors.signature_file[0] }}
+                            </p>
+                        </div>
+
+                        <div v-if="signatureData?.preview_url" class="grid gap-2">
+                            <Label>Current Signature Preview</Label>
+                            <div class="rounded-md border bg-muted p-3">
+                                <img :src="signatureData.preview_url" alt="Signature preview" class="max-h-24 object-contain" />
+                            </div>
+                        </div>
+
+                        <div class="grid gap-4 rounded-md border p-3">
+                            <h4 class="text-sm font-semibold">Page 2 Placement</h4>
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div class="grid gap-2">
+                                    <Label>Anchor</Label>
+                                    <Select :model-value="signatureForm.page2.anchor" @update:model-value="(value) => signatureForm.page2.anchor = String(value) as SignatureAnchor">
+                                        <SelectTrigger>
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="top_left">Top Left</SelectItem>
+                                            <SelectItem value="top_right">Top Right</SelectItem>
+                                            <SelectItem value="bottom_left">Bottom Left</SelectItem>
+                                            <SelectItem value="bottom_right">Bottom Right</SelectItem>
+                                            <SelectItem value="center">Center</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                                <div class="grid gap-2">
+                                    <Label for="sig-page2-width">Width (mm)</Label>
+                                    <Input id="sig-page2-width" v-model.number="signatureForm.page2.width" type="number" min="1" max="300" step="0.1" />
+                                </div>
+                                <div class="grid gap-2">
+                                    <Label for="sig-page2-height">Height (mm)</Label>
+                                    <Input id="sig-page2-height" v-model.number="signatureForm.page2.height" type="number" min="1" max="300" step="0.1" />
+                                </div>
+                                <div class="grid gap-2">
+                                    <Label for="sig-page2-offset-x">Offset X (mm)</Label>
+                                    <Input id="sig-page2-offset-x" v-model.number="signatureForm.page2.offset_x" type="number" min="-500" max="500" step="0.1" />
+                                </div>
+                                <div class="grid gap-2">
+                                    <Label for="sig-page2-offset-y">Offset Y (mm)</Label>
+                                    <Input id="sig-page2-offset-y" v-model.number="signatureForm.page2.offset_y" type="number" min="-500" max="500" step="0.1" />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="grid gap-4 rounded-md border p-3">
+                            <h4 class="text-sm font-semibold">Page 3 Placement</h4>
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div class="grid gap-2">
+                                    <Label>Anchor</Label>
+                                    <Select :model-value="signatureForm.page3.anchor" @update:model-value="(value) => signatureForm.page3.anchor = String(value) as SignatureAnchor">
+                                        <SelectTrigger>
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="top_left">Top Left</SelectItem>
+                                            <SelectItem value="top_right">Top Right</SelectItem>
+                                            <SelectItem value="bottom_left">Bottom Left</SelectItem>
+                                            <SelectItem value="bottom_right">Bottom Right</SelectItem>
+                                            <SelectItem value="center">Center</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                                <div class="grid gap-2">
+                                    <Label for="sig-page3-width">Width (mm)</Label>
+                                    <Input id="sig-page3-width" v-model.number="signatureForm.page3.width" type="number" min="1" max="300" step="0.1" />
+                                </div>
+                                <div class="grid gap-2">
+                                    <Label for="sig-page3-height">Height (mm)</Label>
+                                    <Input id="sig-page3-height" v-model.number="signatureForm.page3.height" type="number" min="1" max="300" step="0.1" />
+                                </div>
+                                <div class="grid gap-2">
+                                    <Label for="sig-page3-offset-x">Offset X (mm)</Label>
+                                    <Input id="sig-page3-offset-x" v-model.number="signatureForm.page3.offset_x" type="number" min="-500" max="500" step="0.1" />
+                                </div>
+                                <div class="grid gap-2">
+                                    <Label for="sig-page3-offset-y">Offset Y (mm)</Label>
+                                    <Input id="sig-page3-offset-y" v-model.number="signatureForm.page3.offset_y" type="number" min="-500" max="500" step="0.1" />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <p v-if="signatureErrorMessage" class="text-sm text-destructive">
+                        {{ signatureErrorMessage }}
+                    </p>
+
                     <DialogFooter>
-                        <Button variant="outline" @click="closeDeleteBatchDialog">Cancel</Button>
-                        <Button variant="destructive" :disabled="batchDeleting" @click="confirmDeleteBatch">
-                            <Spinner v-if="batchDeleting" class="size-4" />
-                            Delete batch
+                        <Button v-if="signatureData" variant="destructive" :disabled="signatureDeleting" @click="removeSignature">
+                            <Spinner v-if="signatureDeleting" class="size-4" />
+                            Remove Signature
+                        </Button>
+                        <Button :disabled="signatureSaving" @click="saveSignature">
+                            <Spinner v-if="signatureSaving" class="size-4" />
+                            Save Signature
                         </Button>
                     </DialogFooter>
                 </DialogContent>

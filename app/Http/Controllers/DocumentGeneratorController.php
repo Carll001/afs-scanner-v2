@@ -8,11 +8,15 @@ use App\Models\DocumentBatch;
 use App\Models\DocumentBatchItem;
 use App\Models\DocumentBatchItemActivityLog;
 use App\Models\DocumentBatchTemplate;
+use App\Models\DocumentGeneratorSignature;
 use App\Models\DocumentGeneratorTemplate;
 use App\Models\User;
 use App\Services\DocumentBatchActivityLogger;
 use App\Services\ExcelExtractionService;
+use App\Services\PdfSignatureStampService;
+use App\Services\SignatureImageService;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\File;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -28,15 +32,187 @@ class DocumentGeneratorController extends Controller
 {
     public function index(Request $request): Response
     {
+        /** @var User $user */
+        $user = $request->user();
+
         return Inertia::render('DocumentGenerator', [
-            'initialHistory' => $this->historyPayload($request, null),
+            'initialItems' => $this->allItemsPayload($request, null),
+            'initialSignature' => $this->signaturePayload($user),
+        ]);
+    }
+
+    public function signature(Request $request): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+
+        return response()->json($this->signaturePayload($user));
+    }
+
+    public function storeSignature(Request $request, SignatureImageService $signatureImageService): JsonResponse
+    {
+        $validated = $request->validate([
+            'signature_file' => ['nullable', 'file', 'mimes:png,jpg,jpeg,webp', 'max:5120'],
+            'page2_anchor' => ['required', 'in:top_left,top_right,bottom_left,bottom_right,center'],
+            'page2_offset_x' => ['required', 'numeric', 'min:-500', 'max:500'],
+            'page2_offset_y' => ['required', 'numeric', 'min:-500', 'max:500'],
+            'page2_width' => ['required', 'numeric', 'min:1', 'max:300'],
+            'page2_height' => ['required', 'numeric', 'min:1', 'max:300'],
+            'page3_anchor' => ['required', 'in:top_left,top_right,bottom_left,bottom_right,center'],
+            'page3_offset_x' => ['required', 'numeric', 'min:-500', 'max:500'],
+            'page3_offset_y' => ['required', 'numeric', 'min:-500', 'max:500'],
+            'page3_width' => ['required', 'numeric', 'min:1', 'max:300'],
+            'page3_height' => ['required', 'numeric', 'min:1', 'max:300'],
+        ]);
+
+        /** @var User $user */
+        $user = $request->user();
+        $signature = DocumentGeneratorSignature::query()
+            ->where('user_id', $user->id)
+            ->first();
+
+        if (! $request->hasFile('signature_file') && ! $signature instanceof DocumentGeneratorSignature) {
+            return response()->json([
+                'message' => 'Signature image is required.',
+                'errors' => [
+                    'signature_file' => ['Signature image is required.'],
+                ],
+            ], 422);
+        }
+
+        $processedPath = $signature?->processed_signature_path;
+        $originalPath = $signature?->original_signature_path;
+        $oldPaths = [];
+
+        if ($request->hasFile('signature_file')) {
+            $uploaded = $request->file('signature_file');
+            if (! $uploaded) {
+                return response()->json(['message' => 'Signature file upload failed.'], 422);
+            }
+
+            $oldPaths = array_filter([
+                $signature?->processed_signature_path,
+                $signature?->original_signature_path,
+            ]);
+
+            $originalPath = $uploaded->store("document-generator/{$user->id}/signature", 'local');
+            $processedTempPath = $signatureImageService->processToTransparentPng(
+                Storage::disk('local')->path($originalPath),
+            );
+
+            $processedPath = "document-generator/{$user->id}/signature/processed-".Str::uuid().'.png';
+            $processedFile = new File($processedTempPath);
+            Storage::disk('local')->putFileAs(
+                "document-generator/{$user->id}/signature",
+                $processedFile,
+                basename($processedPath),
+            );
+            @unlink($processedTempPath);
+        }
+
+        if (! is_string($processedPath) || trim($processedPath) === '') {
+            return response()->json(['message' => 'Processed signature was not generated.'], 422);
+        }
+
+        $attributes = [
+            'processed_signature_path' => $processedPath,
+            'original_signature_path' => $originalPath,
+            'anchor' => (string) $validated['page2_anchor'],
+            'offset_x' => (float) $validated['page2_offset_x'],
+            'offset_y' => (float) $validated['page2_offset_y'],
+            'width' => (float) $validated['page2_width'],
+            'height' => (float) $validated['page2_height'],
+        ];
+
+        if ($this->supportsPageSpecificSignatureLayout()) {
+            $attributes = [
+                ...$attributes,
+                'page2_anchor' => (string) $validated['page2_anchor'],
+                'page2_offset_x' => (float) $validated['page2_offset_x'],
+                'page2_offset_y' => (float) $validated['page2_offset_y'],
+                'page2_width' => (float) $validated['page2_width'],
+                'page2_height' => (float) $validated['page2_height'],
+                'page3_anchor' => (string) $validated['page3_anchor'],
+                'page3_offset_x' => (float) $validated['page3_offset_x'],
+                'page3_offset_y' => (float) $validated['page3_offset_y'],
+                'page3_width' => (float) $validated['page3_width'],
+                'page3_height' => (float) $validated['page3_height'],
+            ];
+        }
+
+        DocumentGeneratorSignature::query()->updateOrCreate(
+            ['user_id' => $user->id],
+            $attributes,
+        );
+
+        $this->deleteSignatureFiles($oldPaths);
+
+        return response()->json($this->signaturePayload($user->fresh('documentGeneratorSignature')));
+    }
+
+    public function destroySignature(Request $request): JsonResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $signature = DocumentGeneratorSignature::query()
+            ->where('user_id', $user->id)
+            ->first();
+
+        if ($signature instanceof DocumentGeneratorSignature) {
+            $paths = array_filter([
+                $signature->processed_signature_path,
+                $signature->original_signature_path,
+            ]);
+            $signature->delete();
+            $this->deleteSignatureFiles($paths);
+        }
+
+        return response()->json([
+            'signature' => null,
+        ]);
+    }
+
+    public function signaturePreview(Request $request): BinaryFileResponse
+    {
+        /** @var User $user */
+        $user = $request->user();
+        $signature = DocumentGeneratorSignature::query()
+            ->where('user_id', $user->id)
+            ->first();
+
+        if (! $signature instanceof DocumentGeneratorSignature) {
+            abort(404);
+        }
+
+        $path = $signature->processed_signature_path;
+        if (! Storage::disk('local')->exists($path)) {
+            abort(404);
+        }
+
+        return response()->file(Storage::disk('local')->path($path), [
+            'Content-Type' => 'image/png',
+            'Cache-Control' => 'no-cache, no-store, must-revalidate',
+            'Pragma' => 'no-cache',
+            'Expires' => '0',
         ]);
     }
 
     public function generatedFiles(Request $request): Response
     {
+        $validated = $request->validate([
+            'per_page' => ['nullable', 'integer', 'min:5', 'max:100'],
+            'sort_by' => ['nullable', 'in:created_at,status,row_number,updated_at'],
+            'sort_direction' => ['nullable', 'in:asc,desc'],
+            'status' => ['nullable', 'in:queued,processing,docx_done,pdf_done,failed'],
+            'company_search' => ['nullable', 'string', 'max:255'],
+            'signature_filter' => ['nullable', 'in:signed,unsigned'],
+        ]);
+
         return Inertia::render('GeneratedFiles', [
-            'initialHistory' => $this->historyPayload($request, null),
+            'initialItems' => $this->allItemsPayload($request, [
+                ...$validated,
+                'files_only' => true,
+            ]),
         ]);
     }
 
@@ -188,6 +364,7 @@ class DocumentGeneratorController extends Controller
             'sort_direction' => ['nullable', 'in:asc,desc'],
             'status' => ['nullable', 'in:queued,processing,docx_done,pdf_done,failed'],
             'company_search' => ['nullable', 'string', 'max:255'],
+            'signature_filter' => ['nullable', 'in:signed,unsigned'],
         ]);
 
         $perPage = (int) ($validated['per_page'] ?? 10);
@@ -200,6 +377,14 @@ class DocumentGeneratorController extends Controller
         }
         if (isset($validated['company_search']) && trim($validated['company_search']) !== '') {
             $this->applyCompanySearch($query, $validated['company_search']);
+        }
+        if (isset($validated['signature_filter']) && $this->supportsItemSignatureAppliedAt()) {
+            if ($validated['signature_filter'] === 'signed') {
+                $query->whereNotNull('signature_applied_at');
+            }
+            if ($validated['signature_filter'] === 'unsigned') {
+                $query->whereNull('signature_applied_at');
+            }
         }
 
         $items = $query
@@ -214,6 +399,8 @@ class DocumentGeneratorController extends Controller
                     'row_data' => $item->row_data ?? [],
                     'docx_available' => ! empty($item->docx_path),
                     'pdf_available' => ! empty($item->pdf_path),
+                    'signature_applied' => $item->signature_applied_at !== null,
+                    'signature_applied_at' => $item->signature_applied_at?->toISOString(),
                     'error_message' => $item->error_message,
                     'error_details' => $item->error_details ?? null,
                     'created_at' => $item->created_at?->toISOString(),
@@ -233,6 +420,21 @@ class DocumentGeneratorController extends Controller
         ]);
 
         return response()->json($this->historyPayload($request, $validated));
+    }
+
+    public function allItems(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'per_page' => ['nullable', 'integer', 'min:5', 'max:100'],
+            'sort_by' => ['nullable', 'in:created_at,status,row_number,updated_at'],
+            'sort_direction' => ['nullable', 'in:asc,desc'],
+            'status' => ['nullable', 'in:queued,processing,docx_done,pdf_done,failed'],
+            'company_search' => ['nullable', 'string', 'max:255'],
+            'signature_filter' => ['nullable', 'in:signed,unsigned'],
+            'files_only' => ['nullable', 'boolean'],
+        ]);
+
+        return response()->json($this->allItemsPayload($request, $validated));
     }
 
     public function download(
@@ -269,6 +471,86 @@ class DocumentGeneratorController extends Controller
         $this->assertItemBelongsToBatch($batch, $item);
 
         return response()->json($this->batchItemPayload($item));
+    }
+
+    public function signItem(
+        Request $request,
+        DocumentBatch $batch,
+        DocumentBatchItem $item,
+        PdfSignatureStampService $pdfSignatureStampService
+    ): JsonResponse {
+        $this->assertBatchOwnership($request, $batch);
+        $this->assertItemBelongsToBatch($batch, $item);
+
+        $this->signSingleItem($request->user(), $batch, $item, $pdfSignatureStampService);
+
+        return response()->json([
+            'message' => 'Signature applied.',
+            'item' => $this->batchItemPayload($item->fresh() ?? $item),
+            'pdf_url' => route('document-generator.batches.items.download', [$batch, $item, 'pdf']),
+        ]);
+    }
+
+    public function signItemsBulk(Request $request, PdfSignatureStampService $pdfSignatureStampService): JsonResponse
+    {
+        $validated = $request->validate([
+            'targets' => ['required', 'array', 'min:1'],
+            'targets.*.batch_id' => ['required', 'integer'],
+            'targets.*.item_id' => ['required', 'integer'],
+        ]);
+
+        /** @var User $user */
+        $user = $request->user();
+        $this->resolveSignatureOrFail($user);
+
+        $results = [];
+        foreach ($validated['targets'] as $target) {
+            $batchId = (int) $target['batch_id'];
+            $itemId = (int) $target['item_id'];
+
+            $batch = DocumentBatch::query()->find($batchId);
+            $item = DocumentBatchItem::query()->find($itemId);
+
+            if (! $batch instanceof DocumentBatch || ! $item instanceof DocumentBatchItem) {
+                $results[] = [
+                    'batch_id' => $batchId,
+                    'item_id' => $itemId,
+                    'success' => false,
+                    'message' => 'Item not found.',
+                ];
+                continue;
+            }
+
+            if ((int) $batch->user_id !== (int) $user->id || (int) $item->document_batch_id !== (int) $batch->id) {
+                $results[] = [
+                    'batch_id' => $batchId,
+                    'item_id' => $itemId,
+                    'success' => false,
+                    'message' => 'Item not accessible.',
+                ];
+                continue;
+            }
+
+            try {
+                $this->signSingleItem($user, $batch, $item, $pdfSignatureStampService);
+                $results[] = [
+                    'batch_id' => $batchId,
+                    'item_id' => $itemId,
+                    'success' => true,
+                ];
+            } catch (\Throwable $exception) {
+                $results[] = [
+                    'batch_id' => $batchId,
+                    'item_id' => $itemId,
+                    'success' => false,
+                    'message' => mb_substr($exception->getMessage(), 0, 300),
+                ];
+            }
+        }
+
+        return response()->json([
+            'results' => $results,
+        ]);
     }
 
     public function updateItem(
@@ -326,6 +608,9 @@ class DocumentGeneratorController extends Controller
             $lockedItem->error_details = null;
             $lockedItem->started_at = null;
             $lockedItem->completed_at = null;
+            if ($this->supportsItemSignatureAppliedAt()) {
+                $lockedItem->signature_applied_at = null;
+            }
             $lockedItem->save();
 
             $lockedBatch->status = $lockedBatch->total_items > 0 ? 'queued' : 'completed';
@@ -737,6 +1022,67 @@ class DocumentGeneratorController extends Controller
     /**
      * @return array<string, mixed>
      */
+    private function allItemsPayload(Request $request, ?array $validated): array
+    {
+        $validated ??= [];
+        $perPage = (int) ($validated['per_page'] ?? $request->integer('per_page', 10));
+        $perPage = max(5, min($perPage, 100));
+        $sortBy = (string) ($validated['sort_by'] ?? 'created_at');
+        $sortDirection = (string) ($validated['sort_direction'] ?? 'desc');
+        $filesOnly = (bool) ($validated['files_only'] ?? false);
+
+        $query = DocumentBatchItem::query()
+            ->with([
+                'batch:id,user_id,source_excel_name,template_name',
+            ])
+            ->whereHas('batch', static function (Builder $batchQuery) use ($request): void {
+                $batchQuery->where('user_id', $request->user()->id);
+            });
+
+        if (isset($validated['status'])) {
+            $query->where('status', $validated['status']);
+        }
+
+        if (isset($validated['company_search']) && trim($validated['company_search']) !== '') {
+            $this->applyCompanySearch($query, $validated['company_search']);
+        }
+        if (isset($validated['signature_filter']) && $this->supportsItemSignatureAppliedAt()) {
+            if ($validated['signature_filter'] === 'signed') {
+                $query->whereNotNull('signature_applied_at');
+            }
+            if ($validated['signature_filter'] === 'unsigned') {
+                $query->whereNull('signature_applied_at');
+            }
+        }
+
+        if ($filesOnly) {
+            $query->where(static function (Builder $builder): void {
+                $builder
+                    ->whereNotNull('docx_path')
+                    ->orWhereNotNull('pdf_path');
+            });
+        }
+
+        $items = $query
+            ->orderBy($sortBy, $sortDirection)
+            ->paginate($perPage)
+            ->through(function (DocumentBatchItem $item): array {
+                $batch = $item->batch;
+
+                return [
+                    ...$this->batchItemPayload($item),
+                    'batch_id' => $item->document_batch_id,
+                    'source_excel_name' => $batch?->source_excel_name ?? '',
+                    'template_name' => $batch?->template_name ?? '',
+                ];
+            });
+
+        return $items->toArray();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
     private function templateMappingBatchPayload(DocumentBatch $batch): array
     {
         $batch->loadMissing('templates');
@@ -811,6 +1157,8 @@ class DocumentGeneratorController extends Controller
             'row_data' => $item->row_data ?? [],
             'docx_available' => ! empty($item->docx_path),
             'pdf_available' => ! empty($item->pdf_path),
+            'signature_applied' => $item->signature_applied_at !== null,
+            'signature_applied_at' => $item->signature_applied_at?->toISOString(),
             'error_message' => $item->error_message,
             'error_details' => $item->error_details ?? null,
             'created_at' => $item->created_at?->toISOString(),
@@ -1174,6 +1522,164 @@ class DocumentGeneratorController extends Controller
             throw \Illuminate\Validation\ValidationException::withMessages([
                 'year' => ['Year template entries must use unique years.'],
             ]);
+        }
+    }
+
+    private function signSingleItem(
+        User $user,
+        DocumentBatch $batch,
+        DocumentBatchItem $item,
+        PdfSignatureStampService $pdfSignatureStampService
+    ): void {
+        $signature = $this->resolveSignatureOrFail($user);
+
+        if ($this->supportsItemSignatureAppliedAt() && $item->signature_applied_at !== null) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'signature' => ['Signature is already applied for this file.'],
+            ]);
+        }
+
+        if (! is_string($item->pdf_path) || trim($item->pdf_path) === '') {
+            throw new \RuntimeException('PDF file is not available for this item.');
+        }
+
+        if (! Storage::disk('local')->exists($item->pdf_path)) {
+            throw new \RuntimeException('PDF file is missing on disk.');
+        }
+
+        $pdfSignatureStampService->stampFileWithPageLayouts(
+            Storage::disk('local')->path($item->pdf_path),
+            Storage::disk('local')->path($signature->processed_signature_path),
+            [
+                2 => [
+                    'anchor' => (string) ($signature->page2_anchor ?: $signature->anchor),
+                    'offset_x' => (float) ($signature->page2_offset_x ?? $signature->offset_x),
+                    'offset_y' => (float) ($signature->page2_offset_y ?? $signature->offset_y),
+                    'width' => (float) ($signature->page2_width ?? $signature->width),
+                    'height' => (float) ($signature->page2_height ?? $signature->height),
+                ],
+                3 => [
+                    'anchor' => (string) ($signature->page3_anchor ?: $signature->anchor),
+                    'offset_x' => (float) ($signature->page3_offset_x ?? $signature->offset_x),
+                    'offset_y' => (float) ($signature->page3_offset_y ?? $signature->offset_y),
+                    'width' => (float) ($signature->page3_width ?? $signature->width),
+                    'height' => (float) ($signature->page3_height ?? $signature->height),
+                ],
+            ],
+        );
+
+        if ($this->supportsItemSignatureAppliedAt()) {
+            $item->signature_applied_at = now();
+            $item->save();
+        }
+    }
+
+    private function resolveSignatureOrFail(User $user): DocumentGeneratorSignature
+    {
+        $signature = DocumentGeneratorSignature::query()
+            ->where('user_id', $user->id)
+            ->first();
+
+        if (! $signature instanceof DocumentGeneratorSignature) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'signature' => ['Please upload a default signature first.'],
+            ]);
+        }
+
+        if (! is_string($signature->processed_signature_path) || trim($signature->processed_signature_path) === '') {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'signature' => ['Processed signature file is not configured.'],
+            ]);
+        }
+
+        if (! Storage::disk('local')->exists($signature->processed_signature_path)) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'signature' => ['Processed signature file is missing on disk. Please upload again.'],
+            ]);
+        }
+
+        return $signature;
+    }
+
+    private function supportsPageSpecificSignatureLayout(): bool
+    {
+        static $supportsPageSpecificLayout = null;
+
+        if ($supportsPageSpecificLayout !== null) {
+            return $supportsPageSpecificLayout;
+        }
+
+        $supportsPageSpecificLayout = Schema::hasColumns('document_generator_signatures', [
+            'page2_anchor',
+            'page2_offset_x',
+            'page2_offset_y',
+            'page2_width',
+            'page2_height',
+            'page3_anchor',
+            'page3_offset_x',
+            'page3_offset_y',
+            'page3_width',
+            'page3_height',
+        ]);
+
+        return $supportsPageSpecificLayout;
+    }
+
+    private function supportsItemSignatureAppliedAt(): bool
+    {
+        static $supportsSignatureAppliedAt = null;
+
+        if ($supportsSignatureAppliedAt !== null) {
+            return $supportsSignatureAppliedAt;
+        }
+
+        $supportsSignatureAppliedAt = Schema::hasColumn('document_batch_items', 'signature_applied_at');
+
+        return $supportsSignatureAppliedAt;
+    }
+
+    /**
+     * @return array{signature: array<string, mixed>|null}
+     */
+    private function signaturePayload(User $user): array
+    {
+        $signature = $user->documentGeneratorSignature;
+        if (! $signature instanceof DocumentGeneratorSignature) {
+            return ['signature' => null];
+        }
+
+        return [
+            'signature' => [
+                'page2' => [
+                    'anchor' => (string) ($signature->page2_anchor ?: $signature->anchor),
+                    'offset_x' => (float) ($signature->page2_offset_x ?? $signature->offset_x),
+                    'offset_y' => (float) ($signature->page2_offset_y ?? $signature->offset_y),
+                    'width' => (float) ($signature->page2_width ?? $signature->width),
+                    'height' => (float) ($signature->page2_height ?? $signature->height),
+                ],
+                'page3' => [
+                    'anchor' => (string) ($signature->page3_anchor ?: $signature->anchor),
+                    'offset_x' => (float) ($signature->page3_offset_x ?? $signature->offset_x),
+                    'offset_y' => (float) ($signature->page3_offset_y ?? $signature->offset_y),
+                    'width' => (float) ($signature->page3_width ?? $signature->width),
+                    'height' => (float) ($signature->page3_height ?? $signature->height),
+                ],
+                'preview_url' => route('document-generator.signature.preview', [
+                    'v' => $signature->updated_at?->timestamp,
+                ]),
+            ],
+        ];
+    }
+
+    /**
+     * @param  list<string>  $paths
+     */
+    private function deleteSignatureFiles(array $paths): void
+    {
+        foreach (array_values(array_unique($paths)) as $path) {
+            if (Storage::disk('local')->exists($path)) {
+                Storage::disk('local')->delete($path);
+            }
         }
     }
 
